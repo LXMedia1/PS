@@ -1,0 +1,68 @@
+
+--- Example:
+--- ---@type simple_movement
+--- local x = require("common/utility/simple_movement")
+--- x: -> IntelliSense
+--- Warning: Access with ":", not "."
+
+-- -- Move to a world position
+-- local target = vec3.new(100, 200, 30)
+-- movement:move_to_position(target)
+--
+-- -- Navigate through multiple positions
+-- local waypoints = {
+--     vec3.new(100, 200, 30),
+--     vec3.new(150, 250, 30),
+--     vec3.new(200, 300, 30)
+-- }
+-- movement:navigate(waypoints)
+--
+-- -- Customize movement behavior with your preferred settings
+-- movement:set_constants({
+--     POSITION = {
+--         THRESHOLD = 0.5,      -- Closer stopping distance
+--         MULTIPLIER = 1.5      -- Larger position threshold multiplier
+--     },
+--     ANGLE = {
+--         TURN_THRESHOLD = 0.1, -- More responsive turning
+--         MOVEMENT_THRESHOLD = 0.5  -- Start moving at smaller angles
+--     }
+-- })
+--
+-- -- Enable debug logging to see movement info
+-- movement:set_debug(true)
+--
+-- -- Strafe movement
+-- movement:strafe("left")   -- Start strafing left
+-- movement:strafe("right")  -- Start strafing right
+-- movement:strafe(nil)      -- Stop strafing
+--
+-- -- Check movement state
+-- if movement:is_moving() then
+--     local target = movement:get_target()
+--     print("Moving to:", target.x, target.y, target.z)
+-- end
+--
+-- -- Navigation control
+-- movement:clear_navigation()  -- Stop navigation and clear waypoints
+-- local remaining = movement:get_remaining_waypoints()  -- Get remaining waypoints
+-- movement:skip_waypoint()  -- Skip current waypoint and move to next
+--
+
+---@class simple_movement
+---@field public move_to_position fun(self: simple_movement, position: vec3): boolean Move to a specific position
+---@field public navigate fun(self: simple_movement, waypoints: vec3[]): boolean Navigate through a sequence of waypoints
+---@field public stop fun(self: simple_movement): nil Stop all movement
+---@field public clear_navigation fun(self: simple_movement): nil Clear current navigation and stop movement
+---@field public pause fun(self: simple_movement): nil Pause movement temporarily
+---@field public resume fun(self: simple_movement): nil Resume movement after pause
+---@field public process fun(self: simple_movement): boolean Process one frame of movement, returns true if target reached
+---@field public is_moving fun(self: simple_movement): boolean Check if currently moving to a target
+---@field public get_target fun(self: simple_movement): vec3|nil Get the current target position
+---@field public get_remaining_waypoints fun(self: simple_movement): vec3[] Get remaining waypoints in the queue
+---@field public skip_waypoint fun(self: simple_movement): boolean Skip current waypoint and move to next if available
+---@field public strafe fun(self: simple_movement, direction: string|nil): boolean Strafe in a direction ("left", "right", or nil to stop)
+---@field public set_debug fun(self: simple_movement, enabled: boolean): boolean Enable or disable debug logging
+---@field public set_constants fun(self: simple_movement, constants: table): boolean Customize movement constants
+---@field public get_constants fun(self: simple_movement): table Get current movement constants
+---@field public get_state fun(self: simple_movement): table Get the current internal state
