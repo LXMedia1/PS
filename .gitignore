@@ -4,4 +4,7 @@
 # Ignore files with no extension
 *
 !*/
-!*.* 
+!*.*
+
+# Ignore Cursor-specific files
+.cursorignore 
