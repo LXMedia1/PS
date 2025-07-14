@@ -1,1 +1,6 @@
 *.exe
+
+# Ignore files with no extension
+*
+!*/
+!*.*
