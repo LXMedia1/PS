@@ -355,7 +355,7 @@ function Menu:AddTextInput(text, x, y, default_text, callback, options)
     local textinput_id = options.id or self:generate_id("textinput")
     
     -- Create the actual menu text input
-    local menu_textinput = core.menu.text_input(textinput_id, options.save_input ~= false)
+    local menu_textinput = core.menu.text_input(textinput_id, options.save_input ~= true)
     
     -- Store the text input info
     local textinput_info = {

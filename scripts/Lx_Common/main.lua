@@ -10,6 +10,9 @@ local menu_module = require("gui/elements/menu")
 -- Extract Menu class
 local Menu = menu_module.Menu
 
+-- Optional: Load input capture test (uncomment to enable)
+-- local input_capture_test = require("test_input_capture")
+
 -- ==================== MAIN MENU INTEGRATION ====================
 local lx_guis_tree_node = core.menu.tree_node()
 local lx_guis_checkbox = core.menu.checkbox(true, "lx_selection_bar_enabled")
@@ -69,4 +72,6 @@ core.register_on_update_callback(on_update)
 core.register_on_render_callback(on_render)
 core.register_on_render_menu_callback(on_render_menu)
 
-core.log("Lx Common GUI system loaded successfully - Modular Version") 
+core.log("Lx Common GUI system loaded successfully - Modular Version")
+core.log("Input capture system is available - see INPUT_CAPTURE_GUIDE.md for usage")
+core.log("To test input capture, uncomment the test line in main.lua or create your own menu") 
