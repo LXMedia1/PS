@@ -1,3 +1,5 @@
+# Work in Progress
+
 # LxCommon GUI System Documentation
 
 ## Overview
@@ -32,6 +34,22 @@ Lx_Common/
 - **Modular Design**: Clean separation of concerns with reusable components
 - **Persistent Settings**: Automatic saving/loading of component states
 
+### Input Blocking Behavior
+
+The GUI system provides **partial input blocking**:
+
+**What IS blocked:**
+- **Movement**: Character movement is disabled when GUI elements are focused
+- **Mouse clicks**: Mouse interactions are blocked within GUI areas through invisible blocking windows
+- **Mouse hover**: GUI areas prevent mouse events from reaching the game world
+
+**What is NOT blocked:**
+- Keyboard hotkeys and shortcuts
+- Spell casting and ability usage
+- Other game actions that don't involve movement or mouse clicks
+
+**Note:** The system uses `LxCommon.isInputBlocked()` to provide status information, but developers should implement their own input blocking logic for non-mouse/non-movement inputs when needed.
+
 ## Getting Started
 
 ### Basic Usage
@@ -62,6 +80,9 @@ LxCommon.isInputBlocked()
 
 -- Direct access to Menu class
 LxCommon.Menu
+```
+
+**Note:** `LxCommon.isInputBlocked()` returns `true` when the GUI system is blocking input (mouse over GUI areas, text input focused, or keybind listening). Use this in your own logic to prevent processing game actions when the GUI is active.
 ```
 
 ## Menu Components
