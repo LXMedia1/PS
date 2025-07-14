@@ -4,4 +4,7 @@
 # Ignore project folders
 assets
 license
-user
+user/
+
+# Testing projects
+LX_Debug/

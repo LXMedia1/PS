@@ -3,3 +3,6 @@ assets
 license
 user
 .cursorignore
+
+# Testing projects
+LX_Debug/
