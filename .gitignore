@@ -1,2 +1,7 @@
 # Ignore all executable files
-*.exe 
+*.exe
+
+# Ignore files with no extension
+*
+!*/
+!*.* 

@@ -1,2 +1,7 @@
 # Ignore all executable files from Cursor indexing
-*.exe 
+*.exe
+
+# Ignore files with no extension from Cursor indexing
+*
+!*/
+!*.* 
