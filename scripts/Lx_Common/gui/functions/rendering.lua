@@ -65,7 +65,7 @@ local function get_key_name(key_code)
         [192] = "`", [219] = "[", [220] = "\\", [221] = "]", [222] = "'"
     }
     
-    return key_names[key_code] or "Key " .. tostring(key_code)
+    return (key_names[key_code] or "Key ") .. tostring(key_code)
 end
 
 -- ==================== GUI CONTENT RENDERING ====================
