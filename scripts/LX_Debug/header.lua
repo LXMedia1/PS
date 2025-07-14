@@ -1,14 +1,13 @@
--- Lx Common API Plugin Header
+-- LX Debug Plugin Header
 local plugin = {}
 
-plugin["name"] = "lx_common"
+plugin["name"] = "lx_debug"
 plugin["author"] = "Lexxes"
 plugin["version"] = "1.0"
-plugin["description"] = "Common API library with utility functions used across all projects"
+plugin["description"] = "Debug and testing environment for new functions and features"
 
 plugin["load"] = true
-plugin["is_library"] = true
-plugin["is_required_dependency"] = true
+plugin["dependencies"] = {"lx_common"}
 
 -- Basic validation to ensure we can load
 if core and core.object_manager then
@@ -19,4 +18,4 @@ if core and core.object_manager then
     end
 end
 
-return plugin
+return plugin 
