@@ -319,24 +319,7 @@ local toggle_feature = my_gui:AddKeyCheckbox("Auto Attack", 10, 120, 0x41, true,
 end)
 ```
 
-### Images
 
-Display images with interactive features.
-
-```lua
-my_gui:AddImage(image_data, x, y, width, height, options)
-```
-
-**Example:**
-```lua
-local icon = my_gui:AddImage(base64_image_data, 10, 160, 32, 32, {
-    clickable = true,
-    click_callback = function()
-        print("Image clicked!")
-    end,
-    hover_scale = 1.2
-})
-```
 
 ## Advanced Features
 
