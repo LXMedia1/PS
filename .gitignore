@@ -1,6 +1,5 @@
 *.exe
-
-# Ignore files with no extension
-*
-!*/
-!*.*
+assets
+license
+user
+.cursorignore
