@@ -1,6 +1,0 @@
-This is a test file for Project Sylvanas.
-
-Hello, World! This is some test content.
-
-Testing file creation and git operations.
-Date: 2024 
