@@ -2,6 +2,9 @@
 assets
 license
 user
+
+# Cursor IDE files
+.cursor/
 .cursorignore
 
 # Testing projects

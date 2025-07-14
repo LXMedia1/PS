@@ -1,6 +1,0 @@
----
-description: When we need Functions from the API ( core )
-alwaysApply: false
----
-
-+ Always Verify functions with scripts/.api documentation
