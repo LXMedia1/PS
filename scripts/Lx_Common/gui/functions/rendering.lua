@@ -2552,7 +2552,6 @@ local function render_gui_content(gui)
                 if clicked_item_index >= 1 and clicked_item_index <= #listbox.items then
                     if listbox.multi_select then
                         -- Multi-select mode: toggle selection
-                        core.log("DEBUG: Multi-select listbox clicked - item " .. clicked_item_index .. ", Ctrl pressed: " .. tostring(constants.mouse_state.ctrl_pressed))
                         if not listbox.selected_indices then
                             listbox.selected_indices = {}
                         end
@@ -2560,11 +2559,9 @@ local function render_gui_content(gui)
                         -- Check if Ctrl is held for multi-selection
                         if constants.mouse_state.ctrl_pressed then
                             -- Ctrl+Click: Toggle individual items
-                            core.log("DEBUG: Ctrl+Click - toggling item " .. clicked_item_index)
                             listbox.selected_indices[clicked_item_index] = not listbox.selected_indices[clicked_item_index]
                         else
                             -- Normal click in multi-select: Clear all and select only this item
-                            core.log("DEBUG: Normal click - selecting only item " .. clicked_item_index)
                             listbox.selected_indices = {}
                             listbox.selected_indices[clicked_item_index] = true
                         end
@@ -2580,7 +2577,6 @@ local function render_gui_content(gui)
                             end
                             local selected_str = table.concat(selected_indices_list, ",")
                             listbox.gui_ref:SaveComponentValue("listbox_multi", listbox.id, selected_str)
-                            core.log("DEBUG: Auto-saved multi-select listbox '" .. listbox.text .. "' selections: " .. selected_str)
                         end
                         
                         -- For multi-select, call callback with all selected items
@@ -2591,18 +2587,15 @@ local function render_gui_content(gui)
                                     table.insert(selected_items, {index = index, item = listbox.items[index]})
                                 end
                             end
-                            core.log("DEBUG: Multi-select callback with " .. #selected_items .. " items")
                             listbox.callback(selected_items)
                         end
                     else
                         -- Single-select mode: set selection
-                        core.log("DEBUG: Single-select listbox clicked - item " .. clicked_item_index)
                         listbox.selected_index = clicked_item_index
                         
                         -- Auto-save if enabled
                         if listbox.auto_save and listbox.gui_ref and listbox.gui_ref.SaveComponentValue then
                             listbox.gui_ref:SaveComponentValue("listbox", listbox.id, clicked_item_index)
-                            core.log("DEBUG: Auto-saved listbox '" .. listbox.text .. "' selection: " .. tostring(clicked_item_index))
                         end
                         
                         -- Call callback
@@ -2687,7 +2680,6 @@ local function render_gui_content(gui)
                             -- Auto-save and callback
                             if listbox.auto_save and listbox.gui_ref and listbox.gui_ref.SaveComponentValue then
                                 listbox.gui_ref:SaveComponentValue("listbox", listbox.id, new_selection)
-                                core.log("DEBUG: Auto-saved listbox '" .. listbox.text .. "' arrow key selection: " .. tostring(new_selection))
                             end
                             if listbox.callback then
                                 listbox.callback(new_selection, listbox.items[new_selection])
@@ -2714,7 +2706,6 @@ local function render_gui_content(gui)
                             -- Auto-save and callback
                             if listbox.auto_save and listbox.gui_ref and listbox.gui_ref.SaveComponentValue then
                                 listbox.gui_ref:SaveComponentValue("listbox", listbox.id, new_selection)
-                                core.log("DEBUG: Auto-saved listbox '" .. listbox.text .. "' down arrow selection: " .. tostring(new_selection))
                             end
                             if listbox.callback then
                                 listbox.callback(new_selection, listbox.items[new_selection])

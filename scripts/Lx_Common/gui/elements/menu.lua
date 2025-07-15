@@ -168,7 +168,6 @@ function Menu:AddCheckbox(text, x, y, default_state, callback, options)
     local saved_state = default_state or false
     if options.auto_save ~= false then  -- Default to true unless explicitly disabled
         saved_state = self:LoadComponentValue("checkbox", checkbox_id, default_state or false)
-        core.log("DEBUG: Loaded checkbox '" .. text .. "' state: " .. tostring(saved_state))
     end
     
     -- Create the actual menu checkbox
@@ -306,7 +305,6 @@ function Menu:AddCombobox(text, x, y, items, default_index, callback, options)
     local saved_index = default_index or 1
     if options.auto_save ~= false then  -- Default to true unless explicitly disabled
         saved_index = self:LoadComponentValue("combobox", combo_id, default_index or 1)
-        core.log("DEBUG: Loaded combobox '" .. text .. "' selection: " .. tostring(saved_index))
     end
     
     -- Create the actual menu combobox with saved selection
@@ -746,12 +744,11 @@ function Menu:AddListbox(text, x, y, items, default_selected, callback, options)
                         saved_multi_selections[index] = true
                     end
                 end
-                core.log("DEBUG: Loaded multi-select listbox '" .. text .. "' selections: " .. saved_multi_str)
+
             end
         else
             -- For single-select, load the selected index
             saved_selection = self:LoadComponentValue("listbox", listbox_id, default_selected or 0)
-            core.log("DEBUG: Loaded single-select listbox '" .. text .. "' selection: " .. tostring(saved_selection))
         end
     end
     
@@ -765,7 +762,7 @@ function Menu:AddListbox(text, x, y, items, default_selected, callback, options)
             for item in saved_items_str:gmatch("[^|]+") do
                 table.insert(final_items, item)
             end
-            core.log("DEBUG: Loaded listbox '" .. text .. "' items: " .. saved_items_str)
+
         end
     end
     
@@ -815,7 +812,7 @@ function Menu:AddListbox(text, x, y, items, default_selected, callback, options)
         for _ in pairs(saved_multi_selections) do
             count = count + 1
         end
-        core.log("DEBUG: Initialized multi-select with " .. count .. " selections")
+
     end
     
     -- Calculate max scroll based on items and visible area
@@ -996,12 +993,10 @@ end
 -- Save all data to file
 function Menu:SaveDataToFile()
     if not self.auto_save_enabled then 
-        core.log("DEBUG: Auto-save disabled for GUI: " .. self.name)
         return 
     end
     
     local filename = self:GenerateSaveFilename()
-    core.log("DEBUG: Saving to file: " .. filename)
     -- Convert save_data table to a simple string format
     local data_lines = {}
     for key, value in pairs(self.save_data) do
@@ -1029,16 +1024,13 @@ end
 -- Load all data from file
 function Menu:LoadDataFromFile()
     if not self.auto_save_enabled then 
-        core.log("DEBUG: Auto-save disabled for GUI: " .. self.name .. ", skipping load")
         return 
     end
     
     local filename = self:GenerateSaveFilename()
-    core.log("DEBUG: Loading data from file: " .. filename)
     
     -- Read from file using core API
     local data_string = core.read_data_file(filename)
-    core.log("DEBUG: Read data string length: " .. (data_string and string.len(data_string) or 0))
     
     if data_string and data_string ~= "" then
         -- Parse the data string
@@ -1055,32 +1047,22 @@ function Menu:LoadDataFromFile()
                 else
                     self.save_data[key] = value
                 end
-                core.log("DEBUG: Loaded key=" .. key .. " value=" .. tostring(self.save_data[key]))
             end
         end
-        core.log("Loaded saved data for GUI: " .. self.name .. " (Key: " .. self.unique_plugin_key .. ")")
-    else
-        core.log("DEBUG: No data found in file: " .. filename)
     end
 end
 
 -- Save a component's value
 function Menu:SaveComponentValue(component_type, component_id, value)
-    core.log("DEBUG: SaveComponentValue called - type=" .. component_type .. " id=" .. component_id .. " value=" .. tostring(value))
-    
     if not self.auto_save_enabled then 
-        core.log("DEBUG: Auto-save disabled, not saving")
         return 
     end
     
     local save_key = self:GenerateSaveKey(component_type, component_id)
-    core.log("DEBUG: Generated save key: " .. save_key)
     self.save_data[save_key] = value
     
     -- Save to file immediately for persistence
     self:SaveDataToFile()
-    
-    core.log("Saved " .. component_type .. " '" .. component_id .. "' = " .. tostring(value))
 end
 
 -- Load a component's value
@@ -1170,45 +1152,34 @@ end
 -- Add items to a listbox
 function Menu:AddListboxItems(listbox_info, new_items)
     if listbox_info and new_items then
-        core.log("DEBUG: Adding " .. #new_items .. " items to listbox")
         for _, item in ipairs(new_items) do
             table.insert(listbox_info.items, item)
-            core.log("DEBUG: Added item: " .. item)
         end
         -- Recalculate max scroll
         listbox_info.max_scroll = math.max(0, #listbox_info.items - listbox_info.visible_items)
-        core.log("DEBUG: Listbox now has " .. #listbox_info.items .. " items, max_scroll: " .. listbox_info.max_scroll)
         
         -- Auto-save the updated items list if enabled
         if listbox_info.auto_save and listbox_info.gui_ref and listbox_info.gui_ref.SaveComponentValue then
             local items_str = table.concat(listbox_info.items, "|")  -- Use | as separator since items may contain commas
             listbox_info.gui_ref:SaveComponentValue("listbox_items", listbox_info.id, items_str)
-            core.log("DEBUG: Auto-saved listbox items: " .. items_str)
         end
-    else
-        core.log("DEBUG: AddListboxItems called with invalid parameters")
     end
 end
 
 -- Clear all items from a listbox
 function Menu:ClearListbox(listbox_info)
     if listbox_info then
-        core.log("DEBUG: Clearing listbox with " .. #listbox_info.items .. " items")
         listbox_info.items = {}
         listbox_info.selected_index = 0
         listbox_info.selected_indices = {}
         listbox_info.scroll_offset = 0
         listbox_info.max_scroll = 0
         listbox_info.hovered_index = 0
-        core.log("DEBUG: Listbox cleared")
         
         -- Auto-save the cleared items list if enabled
         if listbox_info.auto_save and listbox_info.gui_ref and listbox_info.gui_ref.SaveComponentValue then
             listbox_info.gui_ref:SaveComponentValue("listbox_items", listbox_info.id, "")
-            core.log("DEBUG: Auto-saved cleared listbox items")
         end
-    else
-        core.log("DEBUG: ClearListbox called with invalid listbox_info")
     end
 end
 
