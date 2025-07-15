@@ -82,64 +82,64 @@ if lx then
     -- ==================== KEYBINDS ====================
     demo_gui:AddHeader("Keybinds", 320, 70)
     
-    -- Advanced keybind setup with full features
-    local keybind1 = demo_gui:AddKeybind("Primary Action", 320, 100, 0x47, function(key) -- 'G' key default
+    -- Advanced keybind setup with proper spacing
+    local keybind1 = demo_gui:AddKeybind("Primary Action", 320, demo_gui:GetNextKeybindY(100), 0x47, function(key) -- 'G' key default
         Settings.test_values.primary_key = key
         core.log("Primary Action keybind set to: " .. tostring(key))
     end)
     
-    local keybind2 = demo_gui:AddKeybind("Secondary Action", 320, 130, 0x48, function(key) -- 'H' key default
+    local keybind2 = demo_gui:AddKeybind("Secondary Action", 320, demo_gui:GetNextKeybindY(100), 0x48, function(key) -- 'H' key default
         Settings.test_values.secondary_key = key
         core.log("Secondary Action keybind set to: " .. tostring(key))
     end)
     
-    local keybind3 = demo_gui:AddKeybind("Modifier Key", 320, 160, 0x10, function(key) -- Shift key default
+    local keybind3 = demo_gui:AddKeybind("Modifier Key", 320, demo_gui:GetNextKeybindY(100), 0x10, function(key) -- Shift key default
         Settings.test_values.modifier_key = key
         core.log("Modifier Key keybind set to: " .. tostring(key))
     end)
     
-    local keybind4 = demo_gui:AddKeybind("Unassigned Key", 320, 190, 0, function(key) -- No default
+    local keybind4 = demo_gui:AddKeybind("Unassigned Key", 320, demo_gui:GetNextKeybindY(100), 0, function(key) -- No default
         Settings.test_values.unassigned_key = key
         core.log("Unassigned Key keybind set to: " .. tostring(key))
     end)
     
-    -- Add instructions
-    demo_gui:AddLabel("Instructions:", 320, 225, color.yellow(255))
-    demo_gui:AddLabel("• Click on any keybind to start listening", 320, 245, color.white(200))
-    demo_gui:AddLabel("• Press any key to assign it", 320, 265, color.white(200))
-    demo_gui:AddLabel("• Click 'X' to clear a keybind", 320, 285, color.white(200))
-    demo_gui:AddLabel("• Listening times out after 5 seconds", 320, 305, color.white(200))
+    -- Add instructions (adjusted for proper keybind spacing)
+    demo_gui:AddLabel("Instructions:", 320, 300, color.yellow(255))
+    demo_gui:AddLabel("• Click on any keybind to start listening", 320, 320, color.white(200))
+    demo_gui:AddLabel("• Press any key to assign it", 320, 340, color.white(200))
+    demo_gui:AddLabel("• Click 'X' to clear a keybind", 320, 360, color.white(200))
+    demo_gui:AddLabel("• Listening times out after 5 seconds", 320, 380, color.white(200))
     
     -- ==================== COLOR PICKERS ====================
-    demo_gui:AddHeader("Color Pickers", 320, 340)
+    demo_gui:AddHeader("Color Pickers", 320, 410)
     
-    local colorpicker1 = demo_gui:AddColorPicker("Text Color", 320, 370, color.white(255), function(selected_color)
+    local colorpicker1 = demo_gui:AddColorPicker("Text Color", 320, 440, color.white(255), function(selected_color)
         Settings.test_values.text_color = selected_color
         core.log("Text color changed")
     end)
     
-    local colorpicker2 = demo_gui:AddColorPicker("Background Color", 320, 400, color.new(50, 50, 50, 255), function(selected_color)
+    local colorpicker2 = demo_gui:AddColorPicker("Background Color", 320, 470, color.new(50, 50, 50, 255), function(selected_color)
         Settings.test_values.bg_color = selected_color
         core.log("Background color changed")
     end)
     
     -- ==================== TEXT INPUTS ====================
-    demo_gui:AddHeader("Text Inputs", 320, 440)
+    demo_gui:AddHeader("Text Inputs", 320, 510)
     
-    local textinput1 = demo_gui:AddTextInput("Name", 320, 470, "Enter your name", function(text)
+    local textinput1 = demo_gui:AddTextInput("Name", 320, 540, "Enter your name", function(text)
         Settings.test_values.name = text
         core.log("Name changed to: " .. tostring(text))
     end)
     
-    local textinput2 = demo_gui:AddTextInput("Notes", 320, 500, "Additional notes", function(text)
+    local textinput2 = demo_gui:AddTextInput("Notes", 320, 570, "Additional notes", function(text)
         Settings.test_values.notes = text
         core.log("Notes updated")
     end)
     
     -- ==================== KEY CHECKBOXES ====================
-    demo_gui:AddHeader("Key Checkboxes", 320, 540)
+    demo_gui:AddHeader("Key Checkboxes", 320, 610)
     
-    local key_checkbox1 = demo_gui:AddKeyCheckbox("Toggle Feature", 320, 570, 0x54, true, function(value) -- 'T' key
+    local key_checkbox1 = demo_gui:AddKeyCheckbox("Toggle Feature", 320, 640, 0x54, true, function(value) -- 'T' key
         Settings.test_values.toggle_feature = value
         core.log("Toggle feature: " .. tostring(value))
     end)

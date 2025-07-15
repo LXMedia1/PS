@@ -459,10 +459,8 @@ local function render_gui_content(gui)
                 local cb_x = gui.x_offset + checkbox.x
                 local cb_y = base_y + checkbox.y
                 
-                -- Initialize internal state on first run if not set
-                if checkbox.internal_state == nil then
-                    checkbox.internal_state = checkbox.menu_component:get_state()
-                end
+                -- Get current state from menu component (single source of truth)
+                local current_state = checkbox.menu_component:get_state()
                 
                 -- Handle click interaction
                 local checkbox_size = 16
@@ -471,15 +469,28 @@ local function render_gui_content(gui)
                 local is_clicked = is_hovered and constants.mouse_state.left_button_clicked
                 
                 if is_clicked then
-                    -- Toggle the checkbox state
-                    checkbox.internal_state = not checkbox.internal_state
-                    if checkbox.callback then
-                        checkbox.callback(checkbox.internal_state)
+                    -- Toggle the checkbox state in the menu component
+                    local new_state = not current_state
+                    core.log("DEBUG: Checkbox clicked: " .. checkbox.text .. " - toggling from " .. tostring(current_state) .. " to " .. tostring(new_state))
+                    checkbox.menu_component:set(new_state)
+                    
+                    -- Auto-save checkbox state if enabled
+                    if checkbox.auto_save and checkbox.gui_ref and checkbox.gui_ref.SaveComponentValue then
+                        checkbox.gui_ref:SaveComponentValue("checkbox", checkbox.id, new_state)
+                        checkbox.last_state = new_state
+                        core.log("DEBUG: Auto-saved checkbox: " .. checkbox.text .. " = " .. tostring(new_state))
                     end
+                    
+                    if checkbox.callback then
+                        checkbox.callback(new_state)
+                    end
+                    
+                    -- Update current_state for rendering
+                    current_state = new_state
                 end
                 
-                -- Always use internal state for display and logic
-                local display_checked = checkbox.internal_state
+                -- Use menu component state for display
+                local display_checked = current_state
                 local checkbox_color = display_checked and color.green(255) or color.gray(200)
                 
                 -- Hover effect
@@ -833,6 +844,14 @@ local function render_gui_content(gui)
                             combo.selected_index = i
                             combo.is_open = false
                             combo._dropdown_render_info = nil
+                            
+                            -- Auto-save combobox selection if enabled
+                            if combo.auto_save and combo.gui_ref and combo.gui_ref.SaveComponentValue then
+                                combo.gui_ref:SaveComponentValue("combobox", combo.id, i)
+                                combo.last_selection = i
+                                core.log("DEBUG: Auto-saved combobox: " .. combo.text .. " = " .. tostring(i))
+                            end
+                            
                             if combo.callback then
                                 combo.callback(i)
                             end
@@ -855,7 +874,7 @@ local function render_gui_content(gui)
             end
         end
         
-        -- Render interactive keybinds with full setup functionality
+        -- Render interactive keybinds with clean layout
         for _, keybind in ipairs(gui.keybinds) do
             if keybind.menu_component then
                 local kb_x = gui.x_offset + keybind.x
@@ -871,12 +890,55 @@ local function render_gui_content(gui)
                 if keybind.listen_start_time == nil then
                     keybind.listen_start_time = 0
                 end
+                if keybind.animation_time == nil then
+                    keybind.animation_time = 0
+                end
                 
-                -- Handle keybind interaction
-                local keybind_width = keybind.width or 200
-                local keybind_height = 20
+                -- Update animation time
+                keybind.animation_time = keybind.animation_time + (1.0 / 60.0)
+                
+                -- Layout dimensions - clean and organized with better spacing
+                local label_height = 16
+                local keybind_height = 24
+                local spacing = 4
+                local bottom_margin = 8  -- Extra space below each keybind
+                local total_height = label_height + spacing + keybind_height + bottom_margin
+                local label_indent = 10  -- Back to original position - minimal space for the label text
+                
+                -- Calculate positions
+                local label_y = kb_y
+                local keybind_y = kb_y + label_height + spacing
+                local keybind_x = kb_x + label_indent  -- Move keybind container to the right
+                
+                -- Determine if visibility option should be shown
+                local show_visibility = keybind.show_visibility_option and keybind.current_key ~= 0
+                
+                -- Calculate component widths and positions
+                local key_area_width = show_visibility and 80 or 120  -- Keep original key area width
+                local visibility_width = 100  -- Keep original dropdown width
+                local clear_button_size = 16
+                local show_option_text_width = show_visibility and 80 or 0  -- Width for "Show Option:" text
+                local padding = 8  -- Padding between elements
+                
+                -- Calculate total width needed to contain all elements
+                local total_content_width = key_area_width + padding  -- Start with key area
+                if show_visibility then
+                    total_content_width = total_content_width + show_option_text_width + padding  -- Add "Show Option" text
+                    total_content_width = total_content_width + visibility_width + padding  -- Add visibility dropdown
+                end
+                total_content_width = total_content_width + clear_button_size + padding  -- Add clear button
+                
+                -- Set keybind container width to properly contain all elements
+                local keybind_width = total_content_width + 20  -- Add some extra padding for the container
+                
+                -- Calculate key display area first for click detection
+                local key_area_x = keybind_x + 5
+                local key_area_y = keybind_y + 3
+                local key_area_height = keybind_height - 6
+                
+                -- Check for hover and click on the key area only
                 local is_hovered = helpers.is_point_in_rect(constants.mouse_state.position.x, constants.mouse_state.position.y, 
-                                                            kb_x, kb_y, keybind_width, keybind_height)
+                                                            key_area_x, key_area_y, key_area_width, key_area_height)
                 local is_clicked = is_hovered and constants.mouse_state.left_button_clicked
                 
                 -- Handle click to enter listening mode
@@ -912,6 +974,11 @@ local function render_gui_content(gui)
                                 keybind.is_listening = false
                                 core.log("Keybind set: " .. keybind.text .. " = " .. key_code)
                                 
+                                -- Auto-save keybind
+                                if keybind.gui_ref and keybind.gui_ref.SaveComponentValue then
+                                    keybind.gui_ref:SaveComponentValue("keybind_key", keybind.id, key_code)
+                                end
+                                
                                 -- Call callback if provided
                                 if keybind.callback then
                                     keybind.callback(key_code)
@@ -932,60 +999,133 @@ local function render_gui_content(gui)
                     end
                 end
                 
-                -- Visual styling based on state
-                local keybind_bg = color.new(40, 40, 40, 255)
-                local keybind_border = color.new(100, 100, 100, 255)
-                local text_color = keybind.text_color or color.white(255)
+                -- Clean visual styling based on state
+                local keybind_bg, keybind_border, text_color
                 
                 if keybind.is_listening then
-                    -- Listening state - bright blue
-                    keybind_bg = color.new(0, 100, 200, 255)
-                    keybind_border = color.new(0, 150, 255, 255)
+                    -- Listening state - blue with subtle pulse
+                    local pulse = (math.sin(keybind.animation_time * 4) + 1) / 2
+                    local intensity = 0.8 + (pulse * 0.2)
+                    keybind_bg = color.new(math.floor(40 * intensity), math.floor(70 * intensity), math.floor(140 * intensity), 255)
+                    keybind_border = color.new(math.floor(80 * intensity), math.floor(140 * intensity), math.floor(255 * intensity), 255)
                     text_color = color.white(255)
                 elseif is_hovered then
                     -- Hover state - lighter
                     keybind_bg = color.new(60, 60, 60, 255)
                     keybind_border = color.new(120, 120, 120, 255)
                     text_color = color.new(255, 255, 100, 255)
+                elseif keybind.current_key ~= 0 then
+                    -- Assigned state - subtle green
+                    keybind_bg = color.new(50, 60, 50, 255)
+                    keybind_border = color.new(90, 110, 90, 255)
+                    text_color = color.new(200, 255, 200, 255)
+                else
+                    -- Default state - neutral
+                    keybind_bg = color.new(45, 45, 45, 255)
+                    keybind_border = color.new(80, 80, 80, 255)
+                    text_color = color.new(200, 200, 200, 255)
                 end
                 
-                -- Render keybind background
-                core.graphics.rect_2d_filled(
-                    vec2.new(kb_x, kb_y),
-                    keybind_width, keybind_height,
-                    keybind_bg,
-                    2
-                )
-                
-                -- Render keybind border
-                core.graphics.rect_2d(
-                    vec2.new(kb_x, kb_y),
-                    keybind_width, keybind_height,
-                    keybind_border,
-                    keybind.is_listening and 2 or 1, 2
-                )
-                
-                -- Render keybind text
-                local key_name = get_key_name(keybind.current_key)
-                local display_text = keybind.text .. ": " .. key_name
-                
-                if keybind.is_listening then
-                    display_text = keybind.text .. ": [Press any key...]"
-                end
-                
+                -- Render label text
                 core.graphics.text_2d(
-                    display_text,
-                    vec2.new(kb_x + 5, kb_y + 3),
+                    keybind.text .. ":",
+                    vec2.new(kb_x, label_y),
                     constants.FONT_SIZE,
                     text_color,
                     false
                 )
                 
-                -- Render clear button if not listening
+                -- Render keybind container background
+                core.graphics.rect_2d_filled(
+                    vec2.new(keybind_x, keybind_y),
+                    keybind_width, keybind_height,
+                    keybind_bg,
+                    3
+                )
+                
+                -- Render keybind container border
+                core.graphics.rect_2d(
+                    vec2.new(keybind_x, keybind_y),
+                    keybind_width, keybind_height,
+                    keybind_border,
+                    keybind.is_listening and 2 or 1, 3
+                )
+                
+                -- Key area already calculated above for click detection
+                
+                -- Calculate "Show Option" text position (after key area)
+                local show_option_text = "Show Option:"
+                local show_option_x = key_area_x + key_area_width + 10
+                local show_option_y = key_area_y + 2
+                local show_option_width = core.graphics.get_text_width(show_option_text, constants.FONT_SIZE - 1, 0)
+                
+                -- Calculate visibility dropdown area (after "Show Option" text)
+                local visibility_x = show_option_x + show_option_width + 8
+                local visibility_y = keybind_y + 2
+                local visibility_height = keybind_height - 4
+                
+                -- Render key display background
+                local key_bg = color.new(35, 35, 35, 255)
+                if keybind.is_listening then
+                    key_bg = color.new(30, 50, 90, 255)
+                elseif keybind.current_key ~= 0 then
+                    key_bg = color.new(40, 50, 40, 255)
+                end
+                
+                core.graphics.rect_2d_filled(
+                    vec2.new(key_area_x, key_area_y),
+                    key_area_width, key_area_height,
+                    key_bg,
+                    2
+                )
+                
+                -- Render key display border
+                core.graphics.rect_2d(
+                    vec2.new(key_area_x, key_area_y),
+                    key_area_width, key_area_height,
+                    keybind_border,
+                    1, 2
+                )
+                
+                -- Render key text
+                local key_name = get_key_name(keybind.current_key)
+                local display_key_text = key_name
+                
+                if keybind.is_listening then
+                    -- Simple animated dots
+                    local dot_count = math.floor(keybind.animation_time * 2) % 4
+                    display_key_text = string.rep(".", dot_count + 1)
+                end
+                
+                -- Center the key text in the key area
+                local key_text_width = core.graphics.get_text_width(display_key_text, constants.FONT_SIZE, 0)
+                local key_text_x = key_area_x + (key_area_width - key_text_width) / 2
+                local key_text_y = key_area_y + (key_area_height - constants.FONT_SIZE) / 2
+                
+                core.graphics.text_2d(
+                    display_key_text,
+                    vec2.new(key_text_x, key_text_y),
+                    constants.FONT_SIZE,
+                    text_color,
+                    false
+                )
+                
+                -- Render "Show Option" text (only when key is set)
+                if show_visibility then
+                    core.graphics.text_2d(
+                        show_option_text,
+                        vec2.new(show_option_x, show_option_y),
+                        constants.FONT_SIZE - 1,
+                        color.new(170, 170, 170, 255),
+                        false
+                    )
+                end
+                
+                -- Render clear button if key is set and not listening
                 if not keybind.is_listening and keybind.current_key ~= 0 then
-                    local clear_x = kb_x + keybind_width - 20
-                    local clear_y = kb_y + 2
                     local clear_size = 16
+                    local clear_x = keybind_x + keybind_width - clear_size - 4
+                    local clear_y = keybind_y + (keybind_height - clear_size) / 2
                     
                     local clear_hovered = helpers.is_point_in_rect(constants.mouse_state.position.x, constants.mouse_state.position.y, 
                                                                    clear_x, clear_y, clear_size, clear_size)
@@ -994,13 +1134,29 @@ local function render_gui_content(gui)
                     if clear_clicked then
                         keybind.current_key = 0
                         core.log("Keybind cleared for: " .. keybind.text)
+                        
+                        -- Auto-save cleared keybind
+                        if keybind.gui_ref and keybind.gui_ref.SaveComponentValue then
+                            keybind.gui_ref:SaveComponentValue("keybind_key", keybind.id, 0)
+                        end
+                        
                         if keybind.callback then
                             keybind.callback(0)
                         end
                     end
                     
-                    -- Render clear button
-                    local clear_color = clear_hovered and color.new(255, 100, 100, 255) or color.new(200, 200, 200, 255)
+                    -- Clear button styling
+                    local clear_color = clear_hovered and color.new(255, 100, 100, 255) or color.new(180, 80, 80, 255)
+                    
+                    -- Clear button background
+                    core.graphics.rect_2d_filled(
+                        vec2.new(clear_x, clear_y),
+                        clear_size, clear_size,
+                        color.new(60, 30, 30, 255),
+                        2
+                    )
+                    
+                    -- Clear button border
                     core.graphics.rect_2d(
                         vec2.new(clear_x, clear_y),
                         clear_size, clear_size,
@@ -1008,14 +1164,155 @@ local function render_gui_content(gui)
                         1, 2
                     )
                     
-                    -- Render X
+                    -- Draw X
+                    local x_margin = 4
+                    core.graphics.line_2d(
+                        vec2.new(clear_x + x_margin, clear_y + x_margin),
+                        vec2.new(clear_x + clear_size - x_margin, clear_y + clear_size - x_margin),
+                        clear_color, 2
+                    )
+                    core.graphics.line_2d(
+                        vec2.new(clear_x + clear_size - x_margin, clear_y + x_margin),
+                        vec2.new(clear_x + x_margin, clear_y + clear_size - x_margin),
+                        clear_color, 2
+                    )
+                end
+                
+                -- Render inline visibility dropdown if key is assigned and option is enabled
+                if show_visibility and keybind.visibility_combo then
+                    -- Initialize visibility state if not set
+                    if keybind.current_visibility == nil then
+                        keybind.current_visibility = 1 -- Default to "None"
+                    end
+                    if keybind.visibility_is_open == nil then
+                        keybind.visibility_is_open = false
+                    end
+                    
+                    -- Handle visibility dropdown interaction
+                    local vis_is_hovered = helpers.is_point_in_rect(constants.mouse_state.position.x, constants.mouse_state.position.y, 
+                                                                    visibility_x, visibility_y, visibility_width, visibility_height)
+                    local vis_is_clicked = vis_is_hovered and constants.mouse_state.left_button_clicked
+                    
+                    -- Toggle dropdown on click
+                    if vis_is_clicked then
+                        keybind.visibility_is_open = not keybind.visibility_is_open
+                    end
+                    
+                    -- Render visibility dropdown with better contrast
+                    local vis_bg = vis_is_hovered and color.new(70, 70, 70, 255) or color.new(55, 55, 55, 255)
+                    local vis_border = vis_is_hovered and color.new(150, 150, 150, 255) or color.new(120, 120, 120, 255)
+                    
+                    -- Dropdown background
+                    core.graphics.rect_2d_filled(
+                        vec2.new(visibility_x, visibility_y),
+                        visibility_width, visibility_height,
+                        vis_bg,
+                        2
+                    )
+                    
+                    -- Dropdown border
+                    core.graphics.rect_2d(
+                        vec2.new(visibility_x, visibility_y),
+                        visibility_width, visibility_height,
+                        vis_border,
+                        1, 2
+                    )
+                    
+                    -- Dropdown text (shortened for compact display)
+                    local selected_option = keybind.visibility_options[keybind.current_visibility] or "None"
+                    local display_text = selected_option
+                    if selected_option == "On Active" then
+                        display_text = "Active"
+                    elseif selected_option == "Permanent" then
+                        display_text = "Always"
+                    end
+                    
                     core.graphics.text_2d(
-                        "X",
-                        vec2.new(clear_x + 5, clear_y + 1),
-                        constants.FONT_SIZE - 2,
-                        clear_color,
+                        display_text,
+                        vec2.new(visibility_x + 3, visibility_y + 3),
+                        constants.FONT_SIZE - 1,
+                        color.new(220, 220, 220, 255),  -- Better contrast for visibility dropdown text
                         false
                     )
+                    
+                    -- Dropdown arrow with better visibility
+                    local arrow_x = visibility_x + visibility_width - 12
+                    local arrow_y = visibility_y + (visibility_height / 2)
+                    local arrow_size = 3
+                    local arrow_color = color.new(200, 200, 200, 255)  -- Better contrast for arrow
+                    
+                    if keybind.visibility_is_open then
+                        -- Up arrow
+                        core.graphics.triangle_2d_filled(
+                            vec2.new(arrow_x, arrow_y + arrow_size),
+                            vec2.new(arrow_x + arrow_size, arrow_y - arrow_size),
+                            vec2.new(arrow_x - arrow_size, arrow_y - arrow_size),
+                            arrow_color
+                        )
+                    else
+                        -- Down arrow
+                        core.graphics.triangle_2d_filled(
+                            vec2.new(arrow_x, arrow_y - arrow_size),
+                            vec2.new(arrow_x + arrow_size, arrow_y + arrow_size),
+                            vec2.new(arrow_x - arrow_size, arrow_y + arrow_size),
+                            arrow_color
+                        )
+                    end
+                    
+                    -- Store dropdown info for later rendering (on top) - similar to combobox pattern
+                    if keybind.visibility_is_open then
+                        keybind._visibility_dropdown_render_info = {
+                            visibility_x = visibility_x,
+                            visibility_y = visibility_y,
+                            visibility_width = visibility_width,
+                            visibility_height = visibility_height,
+                            keybind_ref = keybind  -- Store reference to the keybind for interaction
+                        }
+                        
+                        -- Handle dropdown interactions (but don't render yet)
+                        local item_height = 16
+                        local dropdown_y = visibility_y + visibility_height + 2
+                        local dropdown_height = #keybind.visibility_options * item_height
+                        
+                        -- Handle item selection
+                        for i, option in ipairs(keybind.visibility_options) do
+                            local item_y = dropdown_y + ((i - 1) * item_height)
+                            local item_hovered = helpers.is_point_in_rect(constants.mouse_state.position.x, constants.mouse_state.position.y,
+                                                                          visibility_x, item_y, visibility_width, item_height)
+                            local item_clicked = item_hovered and constants.mouse_state.left_button_clicked
+                            
+                            -- Handle item selection
+                            if item_clicked then
+                                keybind.current_visibility = i
+                                keybind.visibility_is_open = false
+                                keybind._visibility_dropdown_render_info = nil
+                                core.log("Visibility changed to: " .. option)
+                                
+                                -- Auto-save visibility setting
+                                if keybind.gui_ref and keybind.gui_ref.SaveComponentValue then
+                                    keybind.gui_ref:SaveComponentValue("keybind_visibility", keybind.id, i)
+                                end
+                                
+                                -- Call visibility callback if provided
+                                if keybind.visibility_callback then
+                                    keybind.visibility_callback(i)
+                                end
+                            end
+                        end
+                        
+                        -- Close dropdown if clicking outside
+                        if constants.mouse_state.left_button_clicked then
+                            local dropdown_area_hovered = helpers.is_point_in_rect(constants.mouse_state.position.x, constants.mouse_state.position.y, 
+                                                                                  visibility_x, visibility_y, visibility_width, visibility_height + dropdown_height + 2)
+                            if not dropdown_area_hovered then
+                                keybind.visibility_is_open = false
+                                keybind._visibility_dropdown_render_info = nil
+                                core.log("Visibility dropdown closed by clicking outside")
+                            end
+                        end
+                    else
+                        keybind._visibility_dropdown_render_info = nil
+                    end
                 end
             end
         end
@@ -1026,9 +1323,22 @@ local function render_gui_content(gui)
                 local cp_x = gui.x_offset + colorpicker.x
                 local cp_y = base_y + colorpicker.y
                 
-                -- Initialize state if not set
+                -- Initialize state if not set (preserving loaded saved colors)
                 if colorpicker.current_color == nil then
                     colorpicker.current_color = colorpicker.default_color or color.white(255)
+                    if not colorpicker._logged_init then
+                        core.log("DEBUG: Initialized current_color for '" .. colorpicker.text .. "' to default: " .. 
+                            (colorpicker.current_color.r or 255) .. "," .. (colorpicker.current_color.g or 255) .. "," .. 
+                            (colorpicker.current_color.b or 255) .. "," .. (colorpicker.current_color.a or 255))
+                        colorpicker._logged_init = true
+                    end
+                else
+                    if not colorpicker._logged_existing then
+                        core.log("DEBUG: Using existing current_color for '" .. colorpicker.text .. "': " .. 
+                            (colorpicker.current_color.r or 255) .. "," .. (colorpicker.current_color.g or 255) .. "," .. 
+                            (colorpicker.current_color.b or 255) .. "," .. (colorpicker.current_color.a or 255))
+                        colorpicker._logged_existing = true
+                    end
                 end
                 if colorpicker.is_open == nil then
                     colorpicker.is_open = false
@@ -1098,11 +1408,15 @@ local function render_gui_content(gui)
                     
                     -- Initialize RGB sliders if not set
                     if colorpicker.rgb_sliders == nil then
+                        local r_val = colorpicker.current_color.r or 255
+                        local g_val = colorpicker.current_color.g or 255
+                        local b_val = colorpicker.current_color.b or 255
                         colorpicker.rgb_sliders = {
-                            r = {value = colorpicker.current_color.r or 255, is_dragging = false},
-                            g = {value = colorpicker.current_color.g or 255, is_dragging = false},
-                            b = {value = colorpicker.current_color.b or 255, is_dragging = false}
+                            r = {value = r_val, is_dragging = false},
+                            g = {value = g_val, is_dragging = false},
+                            b = {value = b_val, is_dragging = false}
                         }
+                        core.log("DEBUG: Initialized RGB sliders for '" .. colorpicker.text .. "' - R:" .. r_val .. " G:" .. g_val .. " B:" .. b_val)
                     end
                     
                     -- Handle rainbow color strip interaction
@@ -1148,7 +1462,20 @@ local function render_gui_content(gui)
                             colorpicker.rgb_sliders.g.value = green
                             colorpicker.rgb_sliders.b.value = blue
                             
+                            -- Update current color immediately
+                            local new_rainbow_color = color.new(red, green, blue, colorpicker.current_color.a or 255)
+                            colorpicker.current_color = new_rainbow_color
+                            
                             core.log("Rainbow color selected: RGB(" .. red .. ", " .. green .. ", " .. blue .. ")")
+                            core.log("DEBUG: Rainbow selection - updating current_color for '" .. colorpicker.text .. "'")
+                            
+                            -- Trigger auto-save for rainbow selection
+                            if colorpicker.auto_save and colorpicker.gui_ref and colorpicker.gui_ref.SaveComponentValue then
+                                local color_str = red .. "," .. green .. "," .. blue .. "," .. (colorpicker.current_color.a or 255)
+                                colorpicker.gui_ref:SaveComponentValue("colorpicker", colorpicker.id, color_str)
+                                colorpicker.last_color = new_rainbow_color
+                                core.log("DEBUG: Auto-saved rainbow color: " .. colorpicker.text .. " = " .. color_str)
+                            end
                         end
                     end
                     
@@ -1221,6 +1548,40 @@ local function render_gui_content(gui)
                     
                     -- Always update current color (for live preview)
                     colorpicker.current_color = new_color
+                    
+                    -- Auto-save color if enabled and value changed
+                    if colorpicker.auto_save and colorpicker.gui_ref and colorpicker.gui_ref.SaveComponentValue then
+                        -- Ensure last_color is properly initialized from current_color
+                        if not colorpicker.last_color then
+                            colorpicker.last_color = colorpicker.current_color or color.white(255)
+                            core.log("DEBUG: Initialized last_color for '" .. colorpicker.text .. "' from current_color: " .. 
+                                (colorpicker.current_color.r or 255) .. "," .. (colorpicker.current_color.g or 255) .. "," .. 
+                                (colorpicker.current_color.b or 255) .. "," .. (colorpicker.current_color.a or 255))
+                        end
+                        
+                        -- Ensure all color components exist with defaults
+                        local last_r = colorpicker.last_color.r or 255
+                        local last_g = colorpicker.last_color.g or 255
+                        local last_b = colorpicker.last_color.b or 255
+                        local last_a = colorpicker.last_color.a or 255
+                        
+                        local new_r = new_color.r or 255
+                        local new_g = new_color.g or 255
+                        local new_b = new_color.b or 255
+                        local new_a = new_color.a or 255
+                        
+                        -- Convert color to string for comparison
+                        local old_color_str = last_r .. "," .. last_g .. "," .. last_b .. "," .. last_a
+                        local new_color_str = new_r .. "," .. new_g .. "," .. new_b .. "," .. new_a
+                        
+                        -- Only save if color actually changed
+                        if old_color_str ~= new_color_str then
+                            core.log("DEBUG: Color changed for '" .. colorpicker.text .. "' - old: " .. old_color_str .. ", new: " .. new_color_str)
+                            colorpicker.gui_ref:SaveComponentValue("colorpicker", colorpicker.id, new_color_str)
+                            colorpicker.last_color = new_color
+                            core.log("DEBUG: Auto-saved color picker: " .. colorpicker.text .. " = " .. new_color_str)
+                        end
+                    end
                     
                     -- Only fire callback if any slider is being dragged
                     if colorpicker.rgb_sliders.r.is_dragging or 
@@ -1636,9 +1997,16 @@ local function render_gui_content(gui)
                         textinput.selection_end = nil
                     end
                     
-                    -- Fire callback if text changed
-                    if text_changed and textinput.callback then
-                        textinput.callback(textinput.current_text)
+                    -- Fire callback and auto-save if text changed
+                    if text_changed then
+                        -- Auto-save text input
+                        if textinput.gui_ref and textinput.gui_ref.SaveComponentValue then
+                            textinput.gui_ref:SaveComponentValue("text_input", textinput.id, textinput.current_text)
+                        end
+                        
+                        if textinput.callback then
+                            textinput.callback(textinput.current_text)
+                        end
                     end
                 end
                 
@@ -1736,6 +2104,8 @@ local function render_gui_content(gui)
                 end
             end
         end
+        
+        -- Checkbox auto-save is now handled directly in the click handler above
         
         for _, component in ipairs(gui.headers) do
             if component.menu_component then
@@ -2045,6 +2415,59 @@ local function render_gui_content(gui)
                     color.new(200, 200, 200, 255),
                     false
                 )
+            end
+        end
+        
+        -- Render all open keybind visibility dropdowns ON TOP of everything else
+        for _, keybind in ipairs(gui.keybinds) do
+            if keybind.visibility_is_open and keybind._visibility_dropdown_render_info then
+                local info = keybind._visibility_dropdown_render_info
+                local item_height = 16
+                local dropdown_y = info.visibility_y + info.visibility_height + 2
+                local dropdown_height = #keybind.visibility_options * item_height
+                
+                -- Dropdown background with better contrast
+                core.graphics.rect_2d_filled(
+                    vec2.new(info.visibility_x, dropdown_y),
+                    info.visibility_width, dropdown_height,
+                    color.new(45, 45, 45, 255),
+                    2
+                )
+                
+                -- Dropdown border with better visibility
+                core.graphics.rect_2d(
+                    vec2.new(info.visibility_x, dropdown_y),
+                    info.visibility_width, dropdown_height,
+                    color.new(120, 120, 120, 255),
+                    1, 2
+                )
+                
+                -- Render dropdown items
+                for i, option in ipairs(keybind.visibility_options) do
+                    local item_y = dropdown_y + ((i - 1) * item_height)
+                    local item_hovered = helpers.is_point_in_rect(constants.mouse_state.position.x, constants.mouse_state.position.y,
+                                                                  info.visibility_x, item_y, info.visibility_width, item_height)
+                    
+                    -- Item background (highlight on hover) with better visibility
+                    if item_hovered then
+                        core.graphics.rect_2d_filled(
+                            vec2.new(info.visibility_x, item_y),
+                            info.visibility_width, item_height,
+                            color.new(80, 80, 80, 255),
+                            0
+                        )
+                    end
+                    
+                    -- Item text with better contrast for selected item
+                    local item_text_color = (i == keybind.current_visibility) and color.new(120, 220, 255, 255) or color.new(220, 220, 220, 255)
+                    core.graphics.text_2d(
+                        option,
+                        vec2.new(info.visibility_x + 3, item_y + 1),
+                        constants.FONT_SIZE - 1,
+                        item_text_color,
+                        false
+                    )
+                end
             end
         end
     end

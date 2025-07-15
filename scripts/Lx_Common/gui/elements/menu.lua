@@ -8,7 +8,18 @@ local vec2 = constants.vec2
 local Menu = {}
 Menu.__index = Menu
 
-function Menu:new(name, width, height)
+function Menu:new(name, width, height, unique_plugin_key)
+    -- Generate unique plugin key if not provided
+    if not unique_plugin_key then
+        -- Use a simple counter instead of os.time() since os is not available
+        if not Menu._unique_counter then
+            Menu._unique_counter = 1
+        else
+            Menu._unique_counter = Menu._unique_counter + 1
+        end
+        unique_plugin_key = "lx_gui_" .. name:lower():gsub("%s+", "_") .. "_" .. tostring(Menu._unique_counter)
+    end
+    
     local gui = setmetatable({
         name = name,
         width = width or 400,  -- Default width
@@ -31,7 +42,10 @@ function Menu:new(name, width, height)
         tree_nodes = {},  -- Store tree nodes for this GUI
         key_checkboxes = {},  -- Store key checkboxes for this GUI
         menu_components = {},  -- Store actual menu components
-        component_counter = 0  -- For unique IDs
+        component_counter = 0,  -- For unique IDs
+        unique_plugin_key = unique_plugin_key,  -- Unique identifier for this plugin
+        save_data = {},  -- Store saved component values
+        auto_save_enabled = true  -- Enable automatic saving by default
     }, Menu)
     
     -- Calculate position for this GUI centered on the actual screen
@@ -44,6 +58,9 @@ function Menu:new(name, width, height)
     constants.registered_guis[name] = gui
     constants.gui_states[name] = core.menu.checkbox(true, "lx_gui_enabled_" .. name:lower():gsub("%s+", "_"))
     
+    -- Load saved data for this GUI
+    gui:LoadSavedData()
+    
     return gui
 end
 
@@ -55,6 +72,14 @@ end
 function Menu:generate_id(prefix)
     self.component_counter = self.component_counter + 1
     return string.format("%s_%s_%d", self.name:lower():gsub("%s+", "_"), prefix, self.component_counter)
+end
+
+-- Helper function to calculate proper Y spacing for keybinds
+-- Returns the Y position for the next keybind based on how many already exist
+function Menu:GetNextKeybindY(start_y)
+    start_y = start_y or 10
+    local keybind_spacing = 50  -- Proper spacing between keybinds (matches rendering.lua spacing)
+    return start_y + (#self.keybinds * keybind_spacing)
 end
 
 function Menu:AddLabel(text, x, y, options)
@@ -138,8 +163,15 @@ function Menu:AddCheckbox(text, x, y, default_state, callback, options)
     -- Create unique ID for this checkbox
     local checkbox_id = options.id or self:generate_id("checkbox")
     
+    -- Load saved checkbox state (only if auto_save is enabled for this component)
+    local saved_state = default_state or false
+    if options.auto_save ~= false then  -- Default to true unless explicitly disabled
+        saved_state = self:LoadComponentValue("checkbox", checkbox_id, default_state or false)
+        core.log("DEBUG: Loaded checkbox '" .. text .. "' state: " .. tostring(saved_state))
+    end
+    
     -- Create the actual menu checkbox
-    local menu_checkbox = core.menu.checkbox(default_state or false, checkbox_id)
+    local menu_checkbox = core.menu.checkbox(saved_state, checkbox_id)
     
     -- Store the checkbox info
     local checkbox_info = {
@@ -151,7 +183,10 @@ function Menu:AddCheckbox(text, x, y, default_state, callback, options)
         id = checkbox_id,
         width = options.width or 200,
         height = options.height or 20,
-        text_color = options.text_color or color.white(255)
+        text_color = options.text_color or color.white(255),
+        auto_save = options.auto_save ~= false,  -- Default to true unless explicitly disabled
+        last_state = saved_state,  -- Track last state to detect changes
+        gui_ref = self  -- Reference to GUI for saving
     }
     
     table.insert(self.checkboxes, checkbox_info)
@@ -228,8 +263,15 @@ function Menu:AddCombobox(text, x, y, items, default_index, callback, options)
     -- Create unique ID for this combobox
     local combo_id = options.id or self:generate_id("combobox")
     
-    -- Create the actual menu combobox
-    local menu_combo = core.menu.combobox(default_index or 1, combo_id)
+    -- Load saved combobox selection (only if auto_save is enabled for this component)
+    local saved_index = default_index or 1
+    if options.auto_save ~= false then  -- Default to true unless explicitly disabled
+        saved_index = self:LoadComponentValue("combobox", combo_id, default_index or 1)
+        core.log("DEBUG: Loaded combobox '" .. text .. "' selection: " .. tostring(saved_index))
+    end
+    
+    -- Create the actual menu combobox with saved selection
+    local menu_combo = core.menu.combobox(saved_index, combo_id)
     
     -- Store the combobox info
     local combo_info = {
@@ -241,9 +283,13 @@ function Menu:AddCombobox(text, x, y, items, default_index, callback, options)
         id = combo_id,
         items = items or {},
         default_index = default_index or 1,
+        selected_index = saved_index,  -- Track current selection
         width = options.width or 200,
         height = options.height or 20,
-        text_color = options.text_color or color.white(255)
+        text_color = options.text_color or color.white(255),
+        auto_save = options.auto_save ~= false,  -- Default to true unless explicitly disabled
+        last_selection = saved_index,  -- Track last selection to detect changes
+        gui_ref = self  -- Reference to GUI for saving
     }
     
     table.insert(self.comboboxes, combo_info)
@@ -261,12 +307,14 @@ end
 --   - width, height: Keybind field dimensions
 --   - text_color: Color of the text
 --   - initial_toggle_state: Initial toggle state for the keybind
+--   - show_visibility_option: Whether to show the visibility dropdown (default: true)
 --
 -- Features:
 --   - Click to enter listening mode (blue highlight)
 --   - Press any key to assign (automatic detection)
 --   - Clear button (X) to remove keybind
 --   - Proper key name display (F1, Space, etc.)
+--   - Visibility dropdown: None, On Active, Permanent
 --   - Conflict detection and timeout (5 seconds)
 --   - Game input blocking while listening (uses core.input.disable_movement())
 --   - Visual feedback for all states
@@ -279,6 +327,29 @@ function Menu:AddKeybind(text, x, y, default_key, callback, options)
     -- Create the actual menu keybind
     local menu_keybind = core.menu.keybind(default_key or 0, options.initial_toggle_state or false, keybind_id)
     
+    -- Create visibility combobox if key is set and option is enabled
+    local visibility_combo = nil
+    if options.show_visibility_option ~= false then
+        local visibility_id = keybind_id .. "_visibility"
+        visibility_combo = core.menu.combobox(1, visibility_id) -- Default to "None"
+    end
+    
+    -- Load saved values
+    local saved_key = self:LoadComponentValue("keybind_key", keybind_id, default_key or 0)
+    local saved_visibility = self:LoadComponentValue("keybind_visibility", keybind_id, 1)
+    
+    -- Apply saved key to the menu component
+    if saved_key ~= (default_key or 0) then
+        core.log("DEBUG: Applying saved key " .. saved_key .. " to keybind " .. keybind_id)
+        menu_keybind:set_key(saved_key)
+    end
+    
+    -- Apply saved visibility to the visibility combobox
+    if visibility_combo and saved_visibility ~= 1 then
+        core.log("DEBUG: Applying saved visibility " .. saved_visibility .. " to keybind " .. keybind_id)
+        visibility_combo:set(saved_visibility)
+    end
+    
     -- Store the keybind info
     local keybind_info = {
         text = text,
@@ -288,13 +359,23 @@ function Menu:AddKeybind(text, x, y, default_key, callback, options)
         callback = callback,
         id = keybind_id,
         default_key = default_key or 0,
+        current_key = saved_key,  -- Load saved key
         width = options.width or 200,
         height = options.height or 20,
-        text_color = options.text_color or color.white(255)
+        text_color = options.text_color or color.white(255),
+        show_visibility_option = options.show_visibility_option ~= false,
+        visibility_combo = visibility_combo,
+        visibility_options = {"None", "On Active", "Permanent"},
+        current_visibility = saved_visibility, -- Load saved visibility
+        visibility_callback = options.visibility_callback,
+        gui_ref = self  -- Reference to GUI for saving
     }
     
     table.insert(self.keybinds, keybind_info)
     self.menu_components[keybind_id] = menu_keybind
+    if visibility_combo then
+        self.menu_components[keybind_id .. "_visibility"] = visibility_combo
+    end
     
     return keybind_info
 end
@@ -305,8 +386,76 @@ function Menu:AddColorPicker(text, x, y, default_color, callback, options)
     -- Create unique ID for this color picker
     local colorpicker_id = options.id or self:generate_id("colorpicker")
     
+    -- Load saved color value (only if auto_save is enabled for this component)
+    local saved_color = color.new(r, g, b, a)  -- Use extracted RGBA values
+    
+    -- Color parsing successful, debug output removed
+    
+    -- Extract RGBA from color object (handle both .r/.g/.b/.a format and .value format)
+    local r, g, b, a = 0, 0, 0, 255
+    if default_color then
+        if default_color.r and default_color.g and default_color.b then
+            -- Standard RGBA format
+            r, g, b = default_color.r, default_color.g, default_color.b
+            a = default_color.a or 255
+        elseif default_color.value then
+            -- Packed color value format - need to unpack it
+            local value = default_color.value
+            if value == -1 then
+                -- -1 typically means white (0xFFFFFFFF)
+                r, g, b, a = 255, 255, 255, 255
+            else
+                -- Unpack the color value (assuming ARGB format)
+                a = math.floor(value / 16777216) % 256
+                r = math.floor(value / 65536) % 256
+                g = math.floor(value / 256) % 256
+                b = value % 256
+                
+                -- Handle negative values (convert from signed to unsigned)
+                if a < 0 then a = a + 256 end
+                if r < 0 then r = r + 256 end
+                if g < 0 then g = g + 256 end
+                if b < 0 then b = b + 256 end
+            end
+        end
+    end
+    
+    core.log("DEBUG: Creating color picker '" .. text .. "' with default: " .. r .. "," .. g .. "," .. b .. "," .. a)
+    if options.auto_save ~= false then  -- Default to true unless explicitly disabled
+        local saved_color_str = self:LoadComponentValue("colorpicker", colorpicker_id, nil)
+        if saved_color_str and type(saved_color_str) == "string" then
+            -- Parse color string "r,g,b,a"
+            local saved_r, saved_g, saved_b, saved_a = saved_color_str:match("([^,]+),([^,]+),([^,]+),([^,]+)")
+            if saved_r and saved_g and saved_b and saved_a then
+                local parsed_r = tonumber(saved_r)
+                local parsed_g = tonumber(saved_g)
+                local parsed_b = tonumber(saved_b)
+                local parsed_a = tonumber(saved_a)
+                
+                -- Ensure all values are valid numbers
+                if parsed_r and parsed_g and parsed_b and parsed_a then
+                    saved_color = color.new(parsed_r, parsed_g, parsed_b, parsed_a)
+                    core.log("DEBUG: Parsed saved color: " .. saved_color_str .. " -> color object created with components: " .. 
+                        (saved_color.r or "nil") .. "," .. (saved_color.g or "nil") .. "," .. 
+                        (saved_color.b or "nil") .. "," .. (saved_color.a or "nil"))
+                else
+                    core.log("DEBUG: Invalid color values in saved string: " .. saved_color_str)
+                    saved_color = color.new(r, g, b, a)
+                end
+            else
+                core.log("DEBUG: Failed to parse color string: " .. saved_color_str)
+                saved_color = color.new(r, g, b, a)
+            end
+        end
+        
+        -- Final fallback to ensure we always have a valid color
+        if not saved_color then
+            saved_color = color.new(r, g, b, a)
+        end
+    end
+    
     -- Create the actual menu color picker
-    local menu_colorpicker = core.menu.colorpicker(default_color or color.white(255), colorpicker_id)
+    local menu_colorpicker = core.menu.colorpicker(saved_color, colorpicker_id)
     
     -- Store the color picker info
     local colorpicker_info = {
@@ -316,14 +465,38 @@ function Menu:AddColorPicker(text, x, y, default_color, callback, options)
         menu_component = menu_colorpicker,
         callback = callback,
         id = colorpicker_id,
-        default_color = default_color or color.white(255),
+        default_color = color.new(r, g, b, a),
+        current_color = saved_color,  -- Load saved color
         width = options.width or 200,
         height = options.height or 20,
-        text_color = options.text_color or color.white(255)
+        text_color = options.text_color or color.white(255),
+        auto_save = options.auto_save ~= false,  -- Default to true unless explicitly disabled
+        last_color = saved_color,  -- Track last color to detect changes
+        gui_ref = self  -- Reference to GUI for saving
     }
+    
+    -- Debug: verify current_color assignment (development logging)
+    if saved_color then
+        core.log("DEBUG: Loaded saved color for '" .. text .. "': " .. 
+            (saved_color.r or "nil") .. "," .. (saved_color.g or "nil") .. "," .. 
+            (saved_color.b or "nil") .. "," .. (saved_color.a or "nil"))
+    end
     
     table.insert(self.colorpickers, colorpicker_info)
     self.menu_components[colorpicker_id] = menu_colorpicker
+    
+    -- Save initial color value if auto-save is enabled and no existing saved data
+    if colorpicker_info.auto_save then
+        local existing_save = self:LoadComponentValue("colorpicker", colorpicker_id, nil)
+        if not existing_save then
+            -- Only save if there's no existing saved data
+            local color_str = r .. "," .. g .. "," .. b .. "," .. a
+            self:SaveComponentValue("colorpicker", colorpicker_id, color_str)
+            core.log("DEBUG: Saved initial color picker value: " .. text .. " = " .. color_str)
+        else
+            core.log("DEBUG: Skipped saving initial value for " .. text .. " - existing data found: " .. tostring(existing_save))
+        end
+    end
     
     return colorpicker_info
 end
@@ -354,8 +527,20 @@ function Menu:AddTextInput(text, x, y, default_text, callback, options)
     -- Create unique ID for this text input
     local textinput_id = options.id or self:generate_id("textinput")
     
+    -- Load saved text value (only if auto_save is enabled for this component)
+    local saved_text = default_text or ""
+    if options.auto_save == true then  -- Default to false unless explicitly enabled
+        saved_text = self:LoadComponentValue("text_input", textinput_id, default_text or "")
+    end
+    
     -- Create the actual menu text input
     local menu_textinput = core.menu.text_input(textinput_id, options.save_input ~= true)
+    
+    -- Apply saved text to the component if auto_save is enabled
+    if options.auto_save == true and saved_text ~= (default_text or "") then
+        core.log("DEBUG: Applying saved text '" .. saved_text .. "' to text input " .. textinput_id)
+        menu_textinput:set(saved_text)
+    end
     
     -- Store the text input info
     local textinput_info = {
@@ -366,10 +551,14 @@ function Menu:AddTextInput(text, x, y, default_text, callback, options)
         callback = callback,
         id = textinput_id,
         default_text = default_text or "",
+        current_text = saved_text,  -- Load saved text
         placeholder = options.placeholder or "",
         width = options.width or 200,
         height = options.height or 20,
-        text_color = options.text_color or color.white(255)
+        text_color = options.text_color or color.white(255),
+        auto_save = options.auto_save == true,  -- Default to false unless explicitly enabled
+        last_text = saved_text,  -- Track last text to detect changes
+        gui_ref = self  -- Reference to GUI for saving
     }
     
     table.insert(self.text_inputs, textinput_info)
@@ -571,6 +760,33 @@ function Menu:SetKeybindKey(keybind_info, key_code)
     end
 end
 
+-- Get the current visibility setting for a keybind
+function Menu:GetKeybindVisibility(keybind_info)
+    if keybind_info and keybind_info.visibility_combo then
+        return keybind_info.visibility_combo:get_state()
+    end
+    return 1 -- Default to "None"
+end
+
+-- Set the visibility setting for a keybind
+function Menu:SetKeybindVisibility(keybind_info, visibility_index)
+    if keybind_info and keybind_info.visibility_combo then
+        keybind_info.current_visibility = visibility_index or 1
+        if keybind_info.visibility_callback then
+            keybind_info.visibility_callback(visibility_index or 1)
+        end
+    end
+end
+
+-- Get the visibility option name for a keybind
+function Menu:GetKeybindVisibilityName(keybind_info)
+    if keybind_info and keybind_info.visibility_options then
+        local index = keybind_info.current_visibility or 1
+        return keybind_info.visibility_options[index] or "None"
+    end
+    return "None"
+end
+
 function Menu:GetColorPickerValue(colorpicker_info)
     if colorpicker_info and colorpicker_info.menu_component then
         return colorpicker_info.menu_component:get_state()
@@ -594,6 +810,161 @@ end
 
 function Menu:toggle()
     self.is_open = not self.is_open
+end
+
+-- ==================== SAVE/LOAD SYSTEM ====================
+
+-- Generate a unique save key for a component
+function Menu:GenerateSaveKey(component_type, component_id)
+    return string.format("%s_%s_%s", self.unique_plugin_key, component_type, component_id)
+end
+
+-- Generate filename for saving data
+function Menu:GenerateSaveFilename()
+    local filename = "lxcommon_" .. self.unique_plugin_key .. ".dat"
+    core.log("DEBUG: Generated filename: " .. filename)
+    return filename
+end
+
+-- Save all data to file
+function Menu:SaveDataToFile()
+    if not self.auto_save_enabled then 
+        core.log("DEBUG: Auto-save disabled for GUI: " .. self.name)
+        return 
+    end
+    
+    local filename = self:GenerateSaveFilename()
+    core.log("DEBUG: Saving data to file: " .. filename)
+    
+    -- Convert save_data table to a simple string format
+    local data_lines = {}
+    for key, value in pairs(self.save_data) do
+        -- Simple key=value format, handling different types
+        local value_str
+        if type(value) == "boolean" then
+            value_str = value and "true" or "false"
+        elseif type(value) == "number" then
+            value_str = tostring(value)
+        elseif type(value) == "string" then
+            value_str = value
+        else
+            value_str = tostring(value)
+        end
+        table.insert(data_lines, key .. "=" .. value_str)
+        core.log("DEBUG: Saving key=" .. key .. " value=" .. value_str)
+    end
+    
+    local data_string = table.concat(data_lines, "\n")
+    core.log("DEBUG: Final data string length: " .. string.len(data_string))
+    
+    -- Create file first, then write to it using core API
+    core.create_data_file(filename)
+    core.log("DEBUG: Created file: " .. filename)
+    
+    core.write_data_file(filename, data_string)
+    core.log("DEBUG: File write completed for: " .. filename)
+    
+    -- Immediately test if the file can be read back
+    local test_read = core.read_data_file(filename)
+    core.log("DEBUG: Immediate read test - length: " .. (test_read and string.len(test_read) or 0))
+    if test_read and string.len(test_read) > 0 then
+        core.log("DEBUG: Immediate read SUCCESS - first 50 chars: " .. string.sub(test_read, 1, 50))
+    else
+        core.log("DEBUG: Immediate read FAILED - file appears empty or not found")
+    end
+end
+
+-- Load all data from file
+function Menu:LoadDataFromFile()
+    if not self.auto_save_enabled then 
+        core.log("DEBUG: Auto-save disabled for GUI: " .. self.name .. ", skipping load")
+        return 
+    end
+    
+    local filename = self:GenerateSaveFilename()
+    core.log("DEBUG: Loading data from file: " .. filename)
+    
+    -- Read from file using core API
+    local data_string = core.read_data_file(filename)
+    core.log("DEBUG: Read data string length: " .. (data_string and string.len(data_string) or 0))
+    
+    if data_string and data_string ~= "" then
+        -- Parse the data string
+        for line in data_string:gmatch("[^\r\n]+") do
+            local key, value = line:match("^(.-)=(.*)$")
+            if key and value then
+                -- Convert value back to appropriate type
+                if value == "true" then
+                    self.save_data[key] = true
+                elseif value == "false" then
+                    self.save_data[key] = false
+                elseif tonumber(value) then
+                    self.save_data[key] = tonumber(value)
+                else
+                    self.save_data[key] = value
+                end
+                core.log("DEBUG: Loaded key=" .. key .. " value=" .. tostring(self.save_data[key]))
+            end
+        end
+        core.log("Loaded saved data for GUI: " .. self.name .. " (Key: " .. self.unique_plugin_key .. ")")
+    else
+        core.log("DEBUG: No data found in file: " .. filename)
+    end
+end
+
+-- Save a component's value
+function Menu:SaveComponentValue(component_type, component_id, value)
+    core.log("DEBUG: SaveComponentValue called - type=" .. component_type .. " id=" .. component_id .. " value=" .. tostring(value))
+    
+    if not self.auto_save_enabled then 
+        core.log("DEBUG: Auto-save disabled, not saving")
+        return 
+    end
+    
+    local save_key = self:GenerateSaveKey(component_type, component_id)
+    core.log("DEBUG: Generated save key: " .. save_key)
+    self.save_data[save_key] = value
+    
+    -- Save to file immediately for persistence
+    self:SaveDataToFile()
+    
+    core.log("Saved " .. component_type .. " '" .. component_id .. "' = " .. tostring(value))
+end
+
+-- Load a component's value
+function Menu:LoadComponentValue(component_type, component_id, default_value)
+    local save_key = self:GenerateSaveKey(component_type, component_id)
+    
+    -- Check if we have it in memory
+    local saved_value = self.save_data[save_key]
+    return saved_value ~= nil and saved_value or default_value
+end
+
+-- Load all saved data for this GUI
+function Menu:LoadSavedData()
+    if not self.auto_save_enabled then return end
+    
+    -- Load data from file
+    self:LoadDataFromFile()
+    
+    core.log("Loading saved data for GUI: " .. self.name .. " (Key: " .. self.unique_plugin_key .. ")")
+end
+
+-- Clear all saved data for this GUI
+function Menu:ClearSavedData()
+    self.save_data = {}
+    
+    -- Clear the file as well
+    local filename = self:GenerateSaveFilename()
+    core.write_data_file(filename, "")
+    
+    core.log("Cleared all saved data for GUI: " .. self.name)
+end
+
+-- Enable/disable auto-save
+function Menu:SetAutoSave(enabled)
+    self.auto_save_enabled = enabled
+    core.log("Auto-save " .. (enabled and "enabled" or "disabled") .. " for GUI: " .. self.name)
 end
 
 -- Export the Menu class
