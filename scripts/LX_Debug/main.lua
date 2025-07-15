@@ -103,43 +103,61 @@ if lx then
         core.log("Unassigned Key keybind set to: " .. tostring(key))
     end)
     
+    -- Add a toggle mode keybind example
+    local toggle_keybind = demo_gui:AddKeybind("Toggle Mode Test", 320, demo_gui:GetNextKeybindY(100), 0x54, function(key) -- 'T' key default
+        Settings.test_values.toggle_key = key
+        core.log("Toggle Mode keybind set to: " .. tostring(key))
+    end, {
+        is_toggle = true,  -- Enable toggle mode
+        toggle_callback = function(is_toggled_on)
+            Settings.test_values.toggle_feature_active = is_toggled_on
+            core.log("Toggle feature is now: " .. (is_toggled_on and "ACTIVATED" or "DEACTIVATED"))
+        end,
+        visibility_callback = function(visibility_index)
+            local modes = {"None", "On Active", "Permanent"}
+            core.log("Toggle keybind visibility: " .. modes[visibility_index])
+        end
+    })
+    
     -- Add instructions (adjusted for proper keybind spacing)
-    demo_gui:AddLabel("Instructions:", 320, 300, color.yellow(255))
-    demo_gui:AddLabel("• Click on any keybind to start listening", 320, 320, color.white(200))
-    demo_gui:AddLabel("• Press any key to assign it", 320, 340, color.white(200))
-    demo_gui:AddLabel("• Click 'X' to clear a keybind", 320, 360, color.white(200))
-    demo_gui:AddLabel("• Listening times out after 5 seconds", 320, 380, color.white(200))
+    demo_gui:AddLabel("Instructions:", 320, 320, color.yellow(255))
+    demo_gui:AddLabel("• Click on any keybind to start listening", 320, 340, color.white(200))
+    demo_gui:AddLabel("• Press any key to assign it", 320, 360, color.white(200))
+    demo_gui:AddLabel("• Click 'X' to clear a keybind", 320, 380, color.white(200))
+    demo_gui:AddLabel("• 'Toggle Mode Test' switches on/off with 'T' key", 320, 400, color.white(200))
+    demo_gui:AddLabel("• Change 'Show Option' to see status indicators", 320, 420, color.white(200))
+    demo_gui:AddLabel("• Listening times out after 5 seconds", 320, 440, color.white(200))
     
     -- ==================== COLOR PICKERS ====================
-    demo_gui:AddHeader("Color Pickers", 320, 410)
+    demo_gui:AddHeader("Color Pickers", 320, 460)
     
-    local colorpicker1 = demo_gui:AddColorPicker("Text Color", 320, 440, color.white(255), function(selected_color)
+    local colorpicker1 = demo_gui:AddColorPicker("Text Color", 320, 490, color.white(255), function(selected_color)
         Settings.test_values.text_color = selected_color
         core.log("Text color changed")
     end)
     
-    local colorpicker2 = demo_gui:AddColorPicker("Background Color", 320, 470, color.new(50, 50, 50, 255), function(selected_color)
+    local colorpicker2 = demo_gui:AddColorPicker("Background Color", 320, 520, color.new(50, 50, 50, 255), function(selected_color)
         Settings.test_values.bg_color = selected_color
         core.log("Background color changed")
     end)
     
     -- ==================== TEXT INPUTS ====================
-    demo_gui:AddHeader("Text Inputs", 320, 510)
+    demo_gui:AddHeader("Text Inputs", 320, 560)
     
-    local textinput1 = demo_gui:AddTextInput("Name", 320, 540, "Enter your name", function(text)
+    local textinput1 = demo_gui:AddTextInput("Name", 320, 590, "Enter your name", function(text)
         Settings.test_values.name = text
         core.log("Name changed to: " .. tostring(text))
     end)
     
-    local textinput2 = demo_gui:AddTextInput("Notes", 320, 570, "Additional notes", function(text)
+    local textinput2 = demo_gui:AddTextInput("Notes", 320, 620, "Additional notes", function(text)
         Settings.test_values.notes = text
         core.log("Notes updated")
     end)
     
     -- ==================== KEY CHECKBOXES ====================
-    demo_gui:AddHeader("Key Checkboxes", 320, 610)
+    demo_gui:AddHeader("Key Checkboxes", 320, 660)
     
-    local key_checkbox1 = demo_gui:AddKeyCheckbox("Toggle Feature", 320, 640, 0x54, true, function(value) -- 'T' key
+    local key_checkbox1 = demo_gui:AddKeyCheckbox("Toggle Feature", 320, 690, 0x54, true, function(value) -- 'T' key
         Settings.test_values.toggle_feature = value
         core.log("Toggle feature: " .. tostring(value))
     end)
@@ -199,7 +217,7 @@ local function on_update()
     -- Add update logic here if needed
 end
 
--- ==================== RENDER CALLBACK ====================
+-- ==================== RENDER CALLBACKS ====================
 local function on_render()
     -- Add render logic here if needed
 end

@@ -1021,6 +1021,38 @@ local function render_gui_content(gui)
                     end
                 end
                 
+                -- Handle toggle mode detection (when not listening and key is assigned)
+                if not keybind.is_listening and keybind.current_key ~= 0 and keybind.is_toggle then
+                    -- Initialize last_key_state if not set
+                    if keybind.last_key_state == nil then
+                        keybind.last_key_state = false
+                    end
+                    
+                    -- Get current key press state
+                    local current_key_pressed = core.input.is_key_pressed(keybind.current_key)
+                    
+                    -- Detect key press (transition from not pressed to pressed)
+                    if current_key_pressed and not keybind.last_key_state then
+                        -- Toggle the state
+                        keybind.toggle_state = not keybind.toggle_state
+                        
+                        core.log("Keybind toggle: " .. keybind.text .. " = " .. tostring(keybind.toggle_state))
+                        
+                        -- Auto-save toggle state
+                        if keybind.gui_ref and keybind.gui_ref.SaveComponentValue then
+                            keybind.gui_ref:SaveComponentValue("keybind_toggle_state", keybind.id, keybind.toggle_state)
+                        end
+                        
+                        -- Call toggle callback if provided
+                        if keybind.toggle_callback then
+                            keybind.toggle_callback(keybind.toggle_state)
+                        end
+                    end
+                    
+                    -- Update last key state for next frame
+                    keybind.last_key_state = current_key_pressed
+                end
+                
                 -- Clean visual styling based on state
                 local keybind_bg, keybind_border, text_color
                 
@@ -2713,6 +2745,152 @@ local function render_input_blocking_window()
     end
 end
 
+-- ==================== KEYBIND STATUS RENDERING ====================
+local function render_keybind_status_indicators()
+    local y_offset = 10  -- Start position from top of screen
+    local x_offset = 10  -- Left margin
+    local indicator_height = 25  -- Height per keybind indicator
+    local spacing = 5    -- Space between indicators
+    
+    -- Iterate through all GUIs and their keybinds
+    for name, gui in pairs(constants.registered_guis) do
+        if constants.gui_states[name] and constants.gui_states[name]:get_state() then
+            if gui.keybinds then
+                for _, keybind in ipairs(gui.keybinds) do
+                    -- Skip if no key is set
+                    if not keybind.current_key or keybind.current_key == 0 then
+                        goto continue
+                    end
+                    
+                    -- Get visibility setting from both sources (current_visibility takes priority)
+                    local visibility = keybind.current_visibility
+                    if not visibility and keybind.visibility_combo then
+                        visibility = keybind.visibility_combo:get_state()
+                        keybind.current_visibility = visibility  -- Sync the value
+                    end
+                    visibility = visibility or 1  -- Default to "None" (1)
+                    
+                    -- Check if key is currently pressed (for active mode)
+                    local is_key_pressed = core.input.is_key_pressed(keybind.current_key)
+                    
+                    -- Determine if we should show the indicator
+                    local should_show = false
+                    if visibility == 2 then -- On Active
+                        if keybind.is_toggle then
+                            -- For toggle mode: show when toggle is ON (activated)
+                            should_show = keybind.toggle_state
+                        else
+                            -- For active mode: show when key is physically pressed
+                            should_show = is_key_pressed
+                        end
+                    elseif visibility == 3 then -- Permanent
+                        should_show = true
+                    end
+                    -- visibility == 1 (None) means should_show stays false
+                    
+                    if should_show then
+                        -- Calculate position for this indicator
+                        local indicator_x = x_offset
+                        local indicator_y = y_offset
+                        
+                        -- Get key name for display
+                        local key_name = get_key_name(keybind.current_key)
+                        
+                        -- Create display text based on mode
+                        local display_text = keybind.text .. " (" .. key_name .. ")"
+                        if keybind.is_toggle then
+                            local toggle_status = keybind.toggle_state and "ON" or "OFF"
+                            display_text = keybind.text .. " [" .. toggle_status .. "] (" .. key_name .. ")"
+                        end
+                        
+                        -- Calculate text dimensions
+                        local text_width = core.graphics.get_text_width(display_text, constants.FONT_SIZE, 0)
+                        local indicator_width = text_width + 20  -- Add padding
+                        
+                        -- Choose colors based on keybind mode and state
+                        local bg_color, border_color, text_color
+                        
+                        if keybind.is_toggle then
+                            -- Toggle mode: Show toggle state with physical press overlay
+                            if keybind.toggle_state then
+                                if is_key_pressed then
+                                    -- Toggled ON + currently pressing = bright yellow/white
+                                    bg_color = color.new(80, 80, 40, 200)
+                                    border_color = color.new(200, 200, 100, 255)
+                                    text_color = color.new(255, 255, 200, 255)
+                                else
+                                    -- Toggled ON but not pressing = steady green
+                                    bg_color = color.new(40, 80, 40, 200)
+                                    border_color = color.new(80, 160, 80, 255)
+                                    text_color = color.new(200, 255, 200, 255)
+                                end
+                            else
+                                if is_key_pressed then
+                                    -- Toggled OFF but currently pressing = blue
+                                    bg_color = color.new(40, 40, 80, 200)
+                                    border_color = color.new(80, 80, 160, 255)
+                                    text_color = color.new(200, 200, 255, 255)
+                                else
+                                    -- Toggled OFF and not pressing = red/gray
+                                    bg_color = color.new(80, 40, 40, 200)
+                                    border_color = color.new(160, 80, 80, 255)
+                                    text_color = color.new(255, 200, 200, 255)
+                                end
+                            end
+                        else
+                            -- Active mode: Show physical press state only
+                            if is_key_pressed then
+                                -- Green for active/pressed
+                                bg_color = color.new(40, 80, 40, 200)
+                                border_color = color.new(80, 160, 80, 255)
+                                text_color = color.new(200, 255, 200, 255)
+                            else
+                                -- Red/gray for inactive
+                                bg_color = color.new(80, 40, 40, 200)
+                                border_color = color.new(160, 80, 80, 255)
+                                text_color = color.new(255, 200, 200, 255)
+                            end
+                        end
+                        
+                        -- Render background
+                        core.graphics.rect_2d_filled(
+                            vec2.new(indicator_x, indicator_y),
+                            indicator_width, indicator_height,
+                            bg_color,
+                            3
+                        )
+                        
+                        -- Render border
+                        core.graphics.rect_2d(
+                            vec2.new(indicator_x, indicator_y),
+                            indicator_width, indicator_height,
+                            border_color,
+                            2, 3
+                        )
+                        
+                        -- Render text centered in the indicator
+                        local text_x = indicator_x + (indicator_width - text_width) / 2
+                        local text_y = indicator_y + (indicator_height - constants.FONT_SIZE) / 2
+                        
+                        core.graphics.text_2d(
+                            display_text,
+                            vec2.new(text_x, text_y),
+                            constants.FONT_SIZE,
+                            text_color,
+                            false
+                        )
+                        
+                        -- Move to next indicator position
+                        y_offset = y_offset + indicator_height + spacing
+                    end
+                    
+                    ::continue::
+                end
+            end
+        end
+    end
+end
+
 -- ==================== MAIN RENDER FUNCTION ====================
 local function render_direct_gui()
     -- Render input blocking window first (behind our GUI)
@@ -2760,6 +2938,9 @@ local function render_direct_gui()
             render_gui_content(gui)
         end
     end
+    
+    -- Render keybind status indicators (on top of everything)
+    render_keybind_status_indicators()
 end
 
 -- Export functions
@@ -2767,5 +2948,6 @@ return {
     render_direct_gui = render_direct_gui,
     render_gui_content = render_gui_content,
     render_navbar = render_navbar,
-    render_input_blocking_window = render_input_blocking_window
+    render_input_blocking_window = render_input_blocking_window,
+    render_keybind_status_indicators = render_keybind_status_indicators
 } 

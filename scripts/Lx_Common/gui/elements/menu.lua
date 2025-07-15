@@ -346,6 +346,8 @@ end
 --   - text_color: Color of the text
 --   - initial_toggle_state: Initial toggle state for the keybind
 --   - show_visibility_option: Whether to show the visibility dropdown (default: true)
+--   - is_toggle: Whether this keybind operates in toggle mode (default: false for active mode)
+--   - toggle_callback: Function called when toggle state changes: callback(is_toggled_on)
 --
 -- Features:
 --   - Click to enter listening mode (blue highlight)
@@ -353,9 +355,10 @@ end
 --   - Clear button (X) to remove keybind
 --   - Proper key name display (F1, Space, etc.)
 --   - Visibility dropdown: None, On Active, Permanent
+--   - Toggle mode: Key press toggles state on/off (separate from active mode)
 --   - Conflict detection and timeout (5 seconds)
 --   - Game input blocking while listening (uses core.input.disable_movement())
---   - Visual feedback for all states
+--   - Visual feedback for all states (active press + toggle state)
 function Menu:AddKeybind(text, x, y, default_key, callback, options)
     options = options or {}
     
@@ -375,6 +378,7 @@ function Menu:AddKeybind(text, x, y, default_key, callback, options)
     -- Load saved values
     local saved_key = self:LoadComponentValue("keybind_key", keybind_id, default_key or 0)
     local saved_visibility = self:LoadComponentValue("keybind_visibility", keybind_id, 1)
+    local saved_toggle_state = self:LoadComponentValue("keybind_toggle_state", keybind_id, false)
     
     -- Apply saved key to the menu component
     if saved_key ~= (default_key or 0) then
@@ -406,6 +410,11 @@ function Menu:AddKeybind(text, x, y, default_key, callback, options)
         visibility_options = {"None", "On Active", "Permanent"},
         current_visibility = saved_visibility, -- Load saved visibility
         visibility_callback = options.visibility_callback,
+        -- Toggle mode functionality
+        is_toggle = options.is_toggle or false,  -- Default to active mode
+        toggle_state = saved_toggle_state,  -- Load saved toggle state
+        toggle_callback = options.toggle_callback,
+        last_key_state = false,  -- Track key press state for toggle detection
         gui_ref = self  -- Reference to GUI for saving
     }
     

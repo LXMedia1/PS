@@ -27,7 +27,7 @@ LxCommon is a comprehensive GUI system designed for game plugins, providing a co
 - **Comboboxes**: Dropdown menus with full keyboard and mouse support and auto-save
 - **Color Pickers**: Advanced RGB color selection with rainbow presets, live preview, and auto-save
 - **Text Inputs**: Full-featured text input with cursor positioning, text selection, keyboard shortcuts, and placeholder support
-- **Keybinds**: Interactive keybind configuration with conflict detection, visibility options, and auto-save
+- **Keybinds**: Interactive keybind configuration with conflict detection, visibility options, auto-save, and real-time key press detection
 - **Headers**: Section headers for organizing content
 - **Tree Nodes**: Collapsible content sections
 - **Images**: Image rendering support (if available in environment)
@@ -47,6 +47,27 @@ LxCommon is a comprehensive GUI system designed for game plugins, providing a co
 - **Key Repeat**: Proper key repeat functionality for text editing
 - **Input Blocking**: Smart game input blocking when GUI is active
 - **Text Selection**: Click positioning, double-click selection, keyboard navigation
+
+### Keybind Status Indicators
+- **Real-time Key Detection**: Automatically detects when assigned keybind keys are pressed
+- **Dual Mode Support**: 
+  - **Active Mode**: Traditional key press detection (hold to activate)
+  - **Toggle Mode**: Press once to turn on, press again to turn off
+- **Visual Feedback Modes**: Three display options for each keybind:
+  - **None**: No visual indicator (default setting)
+  - **On Active**: Shows indicator based on keybind mode:
+    - *Active Mode*: Shows when key is physically pressed
+    - *Toggle Mode*: Shows when toggle is ON (activated state)
+  - **Permanent**: Always visible indicator showing current state
+- **Toggle Mode Visual States**:
+  - **Green**: Toggle is ON (activated state)
+  - **Red**: Toggle is OFF (deactivated state)  
+  - **Blue**: Toggle is OFF but key currently being pressed
+  - **Yellow/White**: Toggle is ON and key currently being pressed
+- **Upper-left Corner Display**: Status indicators appear in the top-left corner of the screen
+- **Auto-positioning**: Multiple indicators stack vertically with proper spacing
+- **Key Name Display**: Shows keybind name, toggle state, and assigned key (e.g., "Combat Mode [ON] (C)")
+- **Persistent State**: Toggle states are automatically saved and restored between sessions
 
 ### Visual Features
 - **Professional Styling**: Modern dark theme with blue accents
@@ -108,6 +129,60 @@ end, {
         core.log("Visibility changed to: " .. visibility)
     end
 })
+```
+
+#### Keybind with Status Indicator
+```lua
+-- Create a keybind with default key and status indicator
+local combat_key = my_gui:AddKeybind("Combat Mode", 10, 200, 0x43, function(key_code) -- 'C' key
+    if key_code ~= 0 then
+        core.log("Combat mode keybind set to: " .. get_key_name(key_code))
+    end
+end, {
+    show_visibility_option = true,
+    visibility_callback = function(visibility_index)
+        local modes = {"None", "On Active", "Permanent"}
+        core.log("Combat key visibility: " .. modes[visibility_index])
+    end
+})
+
+-- The keybind will automatically show status indicators based on visibility setting:
+-- - None (1): No indicator shown
+-- - On Active (2): Green indicator appears only when 'C' key is pressed
+-- - Permanent (3): Always visible indicator (green when pressed, red when not)
+```
+
+#### Toggle Mode Keybind
+```lua
+-- Create a toggle mode keybind that switches on/off with each key press
+local auto_loot_toggle = my_gui:AddKeybind("Auto Loot", 10, 240, 0x4C, function(key_code) -- 'L' key
+    if key_code ~= 0 then
+        core.log("Auto loot keybind set to: " .. get_key_name(key_code))
+    end
+end, {
+    is_toggle = true,  -- Enable toggle mode
+    show_visibility_option = true,
+    toggle_callback = function(is_toggled_on)
+        core.log("Auto loot is now: " .. (is_toggled_on and "ENABLED" or "DISABLED"))
+        -- Your toggle logic here
+        if is_toggled_on then
+            -- Enable auto loot functionality
+        else
+            -- Disable auto loot functionality
+        end
+    end,
+    visibility_callback = function(visibility_index)
+        local modes = {"None", "On Active", "Permanent"}
+        core.log("Auto loot visibility: " .. modes[visibility_index])
+    end
+})
+
+-- Toggle mode indicators show:
+-- - Green: Feature is ON (activated)
+-- - Red: Feature is OFF (deactivated)
+-- - Blue: Feature is OFF but key currently being pressed
+-- - Yellow: Feature is ON and key currently being pressed
+-- Text format: "Auto Loot [ON] (L)" or "Auto Loot [OFF] (L)"
 ```
 
 #### Advanced Label with Animation
