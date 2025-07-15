@@ -420,7 +420,7 @@ function Menu:AddColorPicker(text, x, y, default_color, callback, options)
         end
     end
     
-    core.log("DEBUG: Creating color picker '" .. text .. "' with default: " .. r .. "," .. g .. "," .. b .. "," .. a)
+
     if options.auto_save ~= false then  -- Default to true unless explicitly disabled
         local saved_color_str = self:LoadComponentValue("colorpicker", colorpicker_id, nil)
         if saved_color_str and type(saved_color_str) == "string" then
@@ -435,9 +435,7 @@ function Menu:AddColorPicker(text, x, y, default_color, callback, options)
                 -- Ensure all values are valid numbers
                 if parsed_r and parsed_g and parsed_b and parsed_a then
                     saved_color = color.new(parsed_r, parsed_g, parsed_b, parsed_a)
-                    core.log("DEBUG: Parsed saved color: " .. saved_color_str .. " -> color object created with components: " .. 
-                        (saved_color.r or "nil") .. "," .. (saved_color.g or "nil") .. "," .. 
-                        (saved_color.b or "nil") .. "," .. (saved_color.a or "nil"))
+
                 else
                     core.log("DEBUG: Invalid color values in saved string: " .. saved_color_str)
                     saved_color = color.new(r, g, b, a)
@@ -475,12 +473,7 @@ function Menu:AddColorPicker(text, x, y, default_color, callback, options)
         gui_ref = self  -- Reference to GUI for saving
     }
     
-    -- Debug: verify current_color assignment (development logging)
-    if saved_color then
-        core.log("DEBUG: Loaded saved color for '" .. text .. "': " .. 
-            (saved_color.r or "nil") .. "," .. (saved_color.g or "nil") .. "," .. 
-            (saved_color.b or "nil") .. "," .. (saved_color.a or "nil"))
-    end
+
     
     table.insert(self.colorpickers, colorpicker_info)
     self.menu_components[colorpicker_id] = menu_colorpicker
@@ -492,9 +485,9 @@ function Menu:AddColorPicker(text, x, y, default_color, callback, options)
             -- Only save if there's no existing saved data
             local color_str = r .. "," .. g .. "," .. b .. "," .. a
             self:SaveComponentValue("colorpicker", colorpicker_id, color_str)
-            core.log("DEBUG: Saved initial color picker value: " .. text .. " = " .. color_str)
+            -- Initial value saved
         else
-            core.log("DEBUG: Skipped saving initial value for " .. text .. " - existing data found: " .. tostring(existing_save))
+            -- Existing data found, skipping initial save
         end
     end
     
@@ -822,7 +815,7 @@ end
 -- Generate filename for saving data
 function Menu:GenerateSaveFilename()
     local filename = "lxcommon_" .. self.unique_plugin_key .. ".dat"
-    core.log("DEBUG: Generated filename: " .. filename)
+
     return filename
 end
 
@@ -834,8 +827,6 @@ function Menu:SaveDataToFile()
     end
     
     local filename = self:GenerateSaveFilename()
-    core.log("DEBUG: Saving data to file: " .. filename)
-    
     -- Convert save_data table to a simple string format
     local data_lines = {}
     for key, value in pairs(self.save_data) do
@@ -851,27 +842,13 @@ function Menu:SaveDataToFile()
             value_str = tostring(value)
         end
         table.insert(data_lines, key .. "=" .. value_str)
-        core.log("DEBUG: Saving key=" .. key .. " value=" .. value_str)
     end
     
     local data_string = table.concat(data_lines, "\n")
-    core.log("DEBUG: Final data string length: " .. string.len(data_string))
     
     -- Create file first, then write to it using core API
     core.create_data_file(filename)
-    core.log("DEBUG: Created file: " .. filename)
-    
     core.write_data_file(filename, data_string)
-    core.log("DEBUG: File write completed for: " .. filename)
-    
-    -- Immediately test if the file can be read back
-    local test_read = core.read_data_file(filename)
-    core.log("DEBUG: Immediate read test - length: " .. (test_read and string.len(test_read) or 0))
-    if test_read and string.len(test_read) > 0 then
-        core.log("DEBUG: Immediate read SUCCESS - first 50 chars: " .. string.sub(test_read, 1, 50))
-    else
-        core.log("DEBUG: Immediate read FAILED - file appears empty or not found")
-    end
 end
 
 -- Load all data from file

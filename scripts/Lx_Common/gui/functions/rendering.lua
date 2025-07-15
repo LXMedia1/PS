@@ -1326,19 +1326,9 @@ local function render_gui_content(gui)
                 -- Initialize state if not set (preserving loaded saved colors)
                 if colorpicker.current_color == nil then
                     colorpicker.current_color = colorpicker.default_color or color.white(255)
-                    if not colorpicker._logged_init then
-                        core.log("DEBUG: Initialized current_color for '" .. colorpicker.text .. "' to default: " .. 
-                            (colorpicker.current_color.r or 255) .. "," .. (colorpicker.current_color.g or 255) .. "," .. 
-                            (colorpicker.current_color.b or 255) .. "," .. (colorpicker.current_color.a or 255))
-                        colorpicker._logged_init = true
-                    end
+                    -- Current color initialized to default
                 else
-                    if not colorpicker._logged_existing then
-                        core.log("DEBUG: Using existing current_color for '" .. colorpicker.text .. "': " .. 
-                            (colorpicker.current_color.r or 255) .. "," .. (colorpicker.current_color.g or 255) .. "," .. 
-                            (colorpicker.current_color.b or 255) .. "," .. (colorpicker.current_color.a or 255))
-                        colorpicker._logged_existing = true
-                    end
+                    -- Using saved current color
                 end
                 if colorpicker.is_open == nil then
                     colorpicker.is_open = false
@@ -1416,7 +1406,7 @@ local function render_gui_content(gui)
                             g = {value = g_val, is_dragging = false},
                             b = {value = b_val, is_dragging = false}
                         }
-                        core.log("DEBUG: Initialized RGB sliders for '" .. colorpicker.text .. "' - R:" .. r_val .. " G:" .. g_val .. " B:" .. b_val)
+                        -- RGB sliders initialized from current color
                     end
                     
                     -- Handle rainbow color strip interaction
@@ -1467,14 +1457,12 @@ local function render_gui_content(gui)
                             colorpicker.current_color = new_rainbow_color
                             
                             core.log("Rainbow color selected: RGB(" .. red .. ", " .. green .. ", " .. blue .. ")")
-                            core.log("DEBUG: Rainbow selection - updating current_color for '" .. colorpicker.text .. "'")
                             
                             -- Trigger auto-save for rainbow selection
                             if colorpicker.auto_save and colorpicker.gui_ref and colorpicker.gui_ref.SaveComponentValue then
                                 local color_str = red .. "," .. green .. "," .. blue .. "," .. (colorpicker.current_color.a or 255)
                                 colorpicker.gui_ref:SaveComponentValue("colorpicker", colorpicker.id, color_str)
                                 colorpicker.last_color = new_rainbow_color
-                                core.log("DEBUG: Auto-saved rainbow color: " .. colorpicker.text .. " = " .. color_str)
                             end
                         end
                     end
