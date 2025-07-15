@@ -548,7 +548,12 @@ local function render_gui_content(gui)
                 
                 -- Initialize internal value if not set
                 if slider.internal_value == nil then
-                    slider.internal_value = slider.default_value
+                    if slider.auto_save and slider.gui_ref then
+                        local saved_value = slider.gui_ref:LoadComponentValue("slider_int", slider.id, slider.default_value)
+                        slider.internal_value = saved_value
+                    else
+                        slider.internal_value = slider.default_value
+                    end
                 end
                 
                 -- Handle drag interaction
@@ -584,6 +589,12 @@ local function render_gui_content(gui)
                     -- Only update if value changed
                     if new_value ~= slider.internal_value then
                         slider.internal_value = new_value
+                        
+                        -- Auto-save if enabled
+                        if slider.auto_save and slider.gui_ref and slider.gui_ref.SaveComponentValue then
+                            slider.gui_ref:SaveComponentValue("slider_int", slider.id, new_value)
+                        end
+                        
                         if slider.callback then
                             slider.callback(new_value)
                         end
@@ -645,7 +656,12 @@ local function render_gui_content(gui)
                 
                 -- Initialize internal value if not set
                 if slider.internal_value == nil then
-                    slider.internal_value = slider.default_value
+                    if slider.auto_save and slider.gui_ref then
+                        local saved_value = slider.gui_ref:LoadComponentValue("slider_float", slider.id, slider.default_value)
+                        slider.internal_value = saved_value
+                    else
+                        slider.internal_value = slider.default_value
+                    end
                 end
                 
                 -- Handle drag interaction
@@ -683,6 +699,12 @@ local function render_gui_content(gui)
                     -- Only update if value changed
                     if new_value ~= slider.internal_value then
                         slider.internal_value = new_value
+                        
+                        -- Auto-save if enabled
+                        if slider.auto_save and slider.gui_ref and slider.gui_ref.SaveComponentValue then
+                            slider.gui_ref:SaveComponentValue("slider_float", slider.id, new_value)
+                        end
+                        
                         if slider.callback then
                             slider.callback(new_value)
                         end

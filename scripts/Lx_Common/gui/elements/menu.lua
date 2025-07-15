@@ -201,8 +201,17 @@ function Menu:AddSliderInt(text, x, y, min_value, max_value, default_value, call
     -- Create unique ID for this slider
     local slider_id = options.id or self:generate_id("slider_int")
     
+    -- Load saved value if auto-save enabled
+    local initial_value = default_value
+    if options.auto_save ~= false then  -- Default to true unless explicitly disabled
+        local saved_value = self:LoadComponentValue("slider_int", slider_id, nil)
+        if saved_value and type(saved_value) == "number" then
+            initial_value = math.max(min_value, math.min(max_value, saved_value))
+        end
+    end
+    
     -- Create the actual menu slider
-    local menu_slider = core.menu.slider_int(min_value, max_value, default_value, slider_id)
+    local menu_slider = core.menu.slider_int(min_value, max_value, initial_value, slider_id)
     
     -- Store the slider info
     local slider_info = {
@@ -217,11 +226,21 @@ function Menu:AddSliderInt(text, x, y, min_value, max_value, default_value, call
         default_value = default_value,
         width = options.width or 200,
         height = options.height or 20,
-        text_color = options.text_color or color.white(255)
+        text_color = options.text_color or color.white(255),
+        auto_save = options.auto_save ~= false,  -- Default to true unless explicitly disabled
+        gui_ref = self  -- Reference to GUI for saving
     }
     
     table.insert(self.sliders_int, slider_info)
     self.menu_components[slider_id] = menu_slider
+    
+    -- Save initial value if auto-save enabled and no existing saved data
+    if slider_info.auto_save then
+        local existing_save = self:LoadComponentValue("slider_int", slider_id, nil)
+        if not existing_save then
+            self:SaveComponentValue("slider_int", slider_id, initial_value)
+        end
+    end
     
     return slider_info
 end
@@ -232,8 +251,17 @@ function Menu:AddSliderFloat(text, x, y, min_value, max_value, default_value, ca
     -- Create unique ID for this slider
     local slider_id = options.id or self:generate_id("slider_float")
     
+    -- Load saved value if auto-save enabled
+    local initial_value = default_value
+    if options.auto_save ~= false then  -- Default to true unless explicitly disabled
+        local saved_value = self:LoadComponentValue("slider_float", slider_id, nil)
+        if saved_value and type(saved_value) == "number" then
+            initial_value = math.max(min_value, math.min(max_value, saved_value))
+        end
+    end
+    
     -- Create the actual menu slider
-    local menu_slider = core.menu.slider_float(min_value, max_value, default_value, slider_id)
+    local menu_slider = core.menu.slider_float(min_value, max_value, initial_value, slider_id)
     
     -- Store the slider info
     local slider_info = {
@@ -248,11 +276,21 @@ function Menu:AddSliderFloat(text, x, y, min_value, max_value, default_value, ca
         default_value = default_value,
         width = options.width or 200,
         height = options.height or 20,
-        text_color = options.text_color or color.white(255)
+        text_color = options.text_color or color.white(255),
+        auto_save = options.auto_save ~= false,  -- Default to true unless explicitly disabled
+        gui_ref = self  -- Reference to GUI for saving
     }
     
     table.insert(self.sliders_float, slider_info)
     self.menu_components[slider_id] = menu_slider
+    
+    -- Save initial value if auto-save enabled and no existing saved data
+    if slider_info.auto_save then
+        local existing_save = self:LoadComponentValue("slider_float", slider_id, nil)
+        if not existing_save then
+            self:SaveComponentValue("slider_float", slider_id, initial_value)
+        end
+    end
     
     return slider_info
 end

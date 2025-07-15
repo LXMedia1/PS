@@ -146,7 +146,7 @@ The LxCommon GUI framework includes a comprehensive auto-save system that automa
 | **Color Pickers** | ✅ **Enabled** | `auto_save = false` to disable |
 | **Keybinds** | ✅ **Always On** | Cannot be disabled |
 | **Text Inputs** | ❌ **Disabled** | `auto_save = true` to enable |
-| **Sliders** | ❌ **Disabled** | `auto_save = true` to enable |
+| **Sliders** | ✅ **Enabled** | `auto_save = false` to disable |
 
 ### Usage Examples
 
@@ -167,6 +167,14 @@ local persistent_text = my_gui:AddTextInput("Username", 10, 110, "", callback, {
 
 -- Color picker with auto-save (default enabled)
 local theme_color = my_gui:AddColorPicker("Theme", 10, 140, color.blue(255), callback)
+
+-- Slider with auto-save (default enabled)
+local volume_slider = my_gui:AddSliderInt("Volume", 10, 170, 0, 100, 75, callback)
+
+-- Slider with auto-save disabled
+local temp_slider = my_gui:AddSliderFloat("Temp Setting", 10, 200, 0.0, 1.0, 0.5, callback, {
+    auto_save = false
+})
 ```
 
 ### Manual Save/Load Control
@@ -242,7 +250,9 @@ end
 ### Component-specific Auto-save Defaults
 - **Keybinds**: Always auto-save (cannot be disabled)
 - **Checkboxes**: Auto-save enabled by default (opt-out with `auto_save = false`)
+- **Comboboxes**: Auto-save enabled by default (opt-out with `auto_save = false`)
 - **Color Pickers**: Auto-save enabled by default (opt-out with `auto_save = false`)
+- **Sliders**: Auto-save enabled by default (opt-out with `auto_save = false`)
 - **Text Inputs**: Auto-save disabled by default (opt-in with `auto_save = true`)
 
 ### File Storage
