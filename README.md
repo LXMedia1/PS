@@ -57,7 +57,6 @@ end)
 PS/
 ├── scripts/
 │   ├── Lx_Common/        # GUI framework and common utilities
-│   ├── LX_Debug/         # Debug utilities and test environment
 │   ├── core_*/           # Core system plugins
 │   ├── ext_*/            # Extension plugins
 │   └── [other plugins]/  # Various specialized plugins
