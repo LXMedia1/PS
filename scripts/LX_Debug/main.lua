@@ -14,196 +14,107 @@ local Settings = {
     test_values = {}
 }
 
--- ==================== COMPREHENSIVE GUI DEMO ====================
+-- ==================== GUI SETUP ====================
 local demo_gui = nil
 
 if lx then
-    -- ==================== MAIN DEMO GUI ====================
-    demo_gui = lx.Gui.register("GUI Component Demo", 800, 800)
+    -- Create a clean debug GUI
+    demo_gui = lx.Gui.register("LX Debug", 600, 500)
     
-    -- Add title
-    demo_gui:AddLabel("=== COMPREHENSIVE GUI DEMO ===", 10, 10, color.orange(255))
-    demo_gui:AddLabel("Showcasing all available GUI components", 10, 35, color.white(255))
+    -- Header
+    demo_gui:AddLabel("LX Debug Panel - Listbox Component Testing", 10, 10, color.white(255))
+    demo_gui:AddLabel("Ready for testing...", 10, 35, color.gray(200))
     
-    -- ==================== LEFT COLUMN ====================
-    demo_gui:AddLabel("← Left Column", 10, 50, color.cyan(255))
-    -- ==================== CHECKBOXES ====================
-    demo_gui:AddHeader("Checkboxes", 10, 70)
-    
-    local checkbox1 = demo_gui:AddCheckbox("Enable Debug Mode", 10, 100, true, function(value)
+    -- Debug controls
+    demo_gui:AddCheckbox("Enable Debug Mode", 10, 60, Settings.debug_mode, function(value)
         Settings.debug_mode = value
         core.log("Debug mode: " .. tostring(value))
     end)
     
-    local checkbox2 = demo_gui:AddCheckbox("Verbose Logging", 10, 125, false, function(value)
-        Settings.verbose_logging = value
-        core.log("Verbose logging: " .. tostring(value))
-    end)
+    -- ==================== LISTBOX DEMOS ====================
+    demo_gui:AddLabel("=== LISTBOX DEMONSTRATIONS ===", 10, 90, color.cyan(255))
+    demo_gui:AddLabel("Scrolling: Page Up/Down, Arrow keys (when focused), or drag scrollbar", 10, 105, color.yellow(200))
     
-    -- ==================== SLIDERS ====================
-    demo_gui:AddHeader("Sliders", 10, 160)
-    
-    local slider_int = demo_gui:AddSliderInt("Integer Value", 10, 190, 0, 100, 50, function(value)
-        Settings.test_values.int_value = value
-        core.log("Integer slider: " .. tostring(value))
-    end)
-    
-    local slider_float = demo_gui:AddSliderFloat("Float Value", 10, 220, 0.0, 1.0, 0.5, function(value)
-        Settings.test_values.float_value = value
-        core.log("Float slider: " .. string.format("%.2f", value))
-    end)
-    
-    -- ==================== COMBOBOXES ====================
-    demo_gui:AddHeader("Comboboxes", 10, 260)
-    
-    local combo_items = {"Option 1", "Option 2", "Option 3", "Option 4"}
-    local combo1 = demo_gui:AddCombobox("Select Option", 10, 290, combo_items, 1, function(value)
-        Settings.test_values.selected_option = value
-        core.log("Selected option: " .. tostring(value) .. " (" .. (combo_items[value] or "Unknown") .. ")")
-    end)
-    
-    -- ==================== RIGHT COLUMN ====================
-    -- Visual separator
-    demo_gui:AddLabel("|", 305, 70, color.gray(100))
-    demo_gui:AddLabel("|", 305, 90, color.gray(100))
-    demo_gui:AddLabel("|", 305, 110, color.gray(100))
-    demo_gui:AddLabel("|", 305, 130, color.gray(100))
-    demo_gui:AddLabel("|", 305, 150, color.gray(100))
-    demo_gui:AddLabel("|", 305, 170, color.gray(100))
-    demo_gui:AddLabel("|", 305, 190, color.gray(100))
-    demo_gui:AddLabel("|", 305, 210, color.gray(100))
-    demo_gui:AddLabel("|", 305, 230, color.gray(100))
-    demo_gui:AddLabel("|", 305, 250, color.gray(100))
-    demo_gui:AddLabel("|", 305, 270, color.gray(100))
-    demo_gui:AddLabel("|", 305, 290, color.gray(100))
-    demo_gui:AddLabel("|", 305, 310, color.gray(100))
-    
-    demo_gui:AddLabel("Right Column →", 320, 50, color.cyan(255))
-    -- ==================== KEYBINDS ====================
-    demo_gui:AddHeader("Keybinds", 320, 70)
-    
-    -- Advanced keybind setup with proper spacing
-    local keybind1 = demo_gui:AddKeybind("Primary Action", 320, demo_gui:GetNextKeybindY(100), 0x47, function(key) -- 'G' key default
-        Settings.test_values.primary_key = key
-        core.log("Primary Action keybind set to: " .. tostring(key))
-    end)
-    
-    local keybind2 = demo_gui:AddKeybind("Secondary Action", 320, demo_gui:GetNextKeybindY(100), 0x48, function(key) -- 'H' key default
-        Settings.test_values.secondary_key = key
-        core.log("Secondary Action keybind set to: " .. tostring(key))
-    end)
-    
-    local keybind3 = demo_gui:AddKeybind("Modifier Key", 320, demo_gui:GetNextKeybindY(100), 0x10, function(key) -- Shift key default
-        Settings.test_values.modifier_key = key
-        core.log("Modifier Key keybind set to: " .. tostring(key))
-    end)
-    
-    local keybind4 = demo_gui:AddKeybind("Unassigned Key", 320, demo_gui:GetNextKeybindY(100), 0, function(key) -- No default
-        Settings.test_values.unassigned_key = key
-        core.log("Unassigned Key keybind set to: " .. tostring(key))
-    end)
-    
-    -- Add a toggle mode keybind example
-    local toggle_keybind = demo_gui:AddKeybind("Toggle Mode Test", 320, demo_gui:GetNextKeybindY(100), 0x54, function(key) -- 'T' key default
-        Settings.test_values.toggle_key = key
-        core.log("Toggle Mode keybind set to: " .. tostring(key))
+    -- Basic single-select listbox
+    local basic_items = {"Apple", "Banana", "Cherry", "Date", "Elderberry", "Fig", "Grape", "Honeydew"}
+    local basic_listbox = demo_gui:AddListbox("Single-Select Fruits", 10, 140, basic_items, 1, function(index, item)
+        core.log("Selected fruit: " .. (item or "None") .. " (index: " .. index .. ")")
+        Settings.test_values.selected_fruit = item
     end, {
-        is_toggle = true,  -- Enable toggle mode
-        toggle_callback = function(is_toggled_on)
-            Settings.test_values.toggle_feature_active = is_toggled_on
-            core.log("Toggle feature is now: " .. (is_toggled_on and "ACTIVATED" or "DEACTIVATED"))
-        end,
-        visibility_callback = function(visibility_index)
-            local modes = {"None", "On Active", "Permanent"}
-            core.log("Toggle keybind visibility: " .. modes[visibility_index])
-        end
+        width = 150,
+        height = 120,
+        visible_items = 6
     })
     
-    -- Add instructions (adjusted for proper keybind spacing)
-    demo_gui:AddLabel("Instructions:", 320, 320, color.yellow(255))
-    demo_gui:AddLabel("• Click on any keybind to start listening", 320, 340, color.white(200))
-    demo_gui:AddLabel("• Press any key to assign it", 320, 360, color.white(200))
-    demo_gui:AddLabel("• Click 'X' to clear a keybind", 320, 380, color.white(200))
-    demo_gui:AddLabel("• 'Toggle Mode Test' switches on/off with 'T' key", 320, 400, color.white(200))
-    demo_gui:AddLabel("• Change 'Show Option' to see status indicators", 320, 420, color.white(200))
-    demo_gui:AddLabel("• Listening times out after 5 seconds", 320, 440, color.white(200))
-    
-    -- ==================== COLOR PICKERS ====================
-    demo_gui:AddHeader("Color Pickers", 320, 460)
-    
-    local colorpicker1 = demo_gui:AddColorPicker("Text Color", 320, 490, color.white(255), function(selected_color)
-        Settings.test_values.text_color = selected_color
-        core.log("Text color changed")
-    end)
-    
-    local colorpicker2 = demo_gui:AddColorPicker("Background Color", 320, 520, color.new(50, 50, 50, 255), function(selected_color)
-        Settings.test_values.bg_color = selected_color
-        core.log("Background color changed")
-    end)
-    
-    -- ==================== TEXT INPUTS ====================
-    demo_gui:AddHeader("Text Inputs", 320, 560)
-    
-    local textinput1 = demo_gui:AddTextInput("Name", 320, 590, "Enter your name", function(text)
-        Settings.test_values.name = text
-        core.log("Name changed to: " .. tostring(text))
-    end)
-    
-    local textinput2 = demo_gui:AddTextInput("Notes", 320, 620, "Additional notes", function(text)
-        Settings.test_values.notes = text
-        core.log("Notes updated")
-    end)
-    
-    -- ==================== KEY CHECKBOXES ====================
-    demo_gui:AddHeader("Key Checkboxes", 320, 660)
-    
-    local key_checkbox1 = demo_gui:AddKeyCheckbox("Toggle Feature", 320, 690, 0x54, true, function(value) -- 'T' key
-        Settings.test_values.toggle_feature = value
-        core.log("Toggle feature: " .. tostring(value))
-    end)
-    
-    -- ==================== BOTTOM SECTION - ADVANCED FEATURES ====================
-    demo_gui:AddHeader("Advanced Features", 10, 340)
-    
-    -- Tree node example
-    local tree_node1 = demo_gui:AddTreeNode("Advanced Settings", 10, 370, function()
-        -- This would render child elements inside the tree node
-        core.log("Tree node expanded")
-    end)
-    
-    -- Dynamic buttons with value display
-    demo_gui:AddButton("Get All Values", 10, 400, 150, 30, function()
-        core.log("=== Current Values ===")
-        core.log("Debug Mode: " .. tostring(Settings.debug_mode))
-        core.log("Verbose Logging: " .. tostring(Settings.verbose_logging))
-        
-        if Settings.test_values.int_value then
-            core.log("Integer: " .. tostring(Settings.test_values.int_value))
+    -- Multi-select listbox
+    local colors = {"Red", "Green", "Blue", "Yellow", "Purple", "Orange", "Pink", "Cyan", "Magenta", "Brown"}
+    local multi_listbox = demo_gui:AddListbox("Multi-Select Colors", 180, 140, colors, 0, function(selected_items)
+        if type(selected_items) == "table" and #selected_items > 0 then
+            local selected_names = {}
+            for _, selection in ipairs(selected_items) do
+                table.insert(selected_names, selection.item)
+            end
+            core.log("Selected colors: " .. table.concat(selected_names, ", "))
+        else
+            core.log("No colors selected")
         end
-        if Settings.test_values.float_value then
-            core.log("Float: " .. string.format("%.2f", Settings.test_values.float_value))
-        end
-        if Settings.test_values.selected_option then
-            core.log("Selected: " .. tostring(Settings.test_values.selected_option))
-        end
-        if Settings.test_values.name then
-            core.log("Name: " .. tostring(Settings.test_values.name))
-        end
-        core.log("=== End Values ===")
+    end, {
+        width = 150,
+        height = 120,
+        visible_items = 6,
+        multi_select = true
+    })
+    
+    -- Scrollable listbox with many items
+    local large_list = {}
+    for i = 1, 50 do
+        table.insert(large_list, "Item " .. i)
+    end
+    local scroll_listbox = demo_gui:AddListbox("Scrollable List", 350, 140, large_list, 5, function(index, item)
+        core.log("Scrollable list selection: " .. (item or "None"))
+        Settings.test_values.scroll_item = item
+    end, {
+        width = 150,
+        height = 100,
+        visible_items = 5
+    })
+    
+    -- Dynamic listbox with controls
+    local dynamic_items = {"Dynamic Item 1", "Dynamic Item 2"}
+    local dynamic_listbox = demo_gui:AddListbox("Dynamic List", 10, 280, dynamic_items, 0, function(index, item)
+        core.log("Dynamic list selection: " .. (item or "None"))
+    end, {
+        width = 200,
+        height = 80,
+        visible_items = 4
+    })
+    
+    -- Control buttons for dynamic listbox
+    demo_gui:AddButton("Add Item", 220, 280, 80, 25, function()
+        local new_item = "Item " .. (#dynamic_listbox.items + 1)
+        demo_gui:AddListboxItems(dynamic_listbox, {new_item})
+        core.log("Added: " .. new_item)
     end)
     
-    demo_gui:AddButton("Reset All", 170, 400, 150, 30, function()
-        -- Reset all values to defaults
-        Settings.test_values = {}
-        core.log("All values reset to defaults")
+    demo_gui:AddButton("Clear All", 310, 280, 80, 25, function()
+        demo_gui:ClearListbox(dynamic_listbox)
+        core.log("Cleared dynamic listbox")
     end)
     
-    -- Status labels
-    demo_gui:AddLabel("Status indicators:", 10, 440, color.cyan(255))
-    demo_gui:AddLabel("• All components functional", 10, 465, color.green(255))
-    demo_gui:AddLabel("• Callbacks working", 10, 490, color.green(255))
-    demo_gui:AddLabel("• Values stored in Settings", 10, 515, color.green(255))
-
+    demo_gui:AddButton("Select Item 2", 220, 310, 80, 25, function()
+        if #dynamic_listbox.items >= 2 then
+            demo_gui:SetListboxSelection(dynamic_listbox, 2)
+            core.log("Programmatically selected item 2")
+        end
+    end)
+    
+    -- Instructions
+    demo_gui:AddLabel("Instructions:", 10, 350, color.yellow(255))
+    demo_gui:AddLabel("- Click items to select them", 10, 370, color.white(200))
+    demo_gui:AddLabel("- Multi-select: Click normally or Ctrl+Click to toggle items", 10, 390, color.white(200))
+    demo_gui:AddLabel("- Scrollable: Drag scrollbar, arrow keys, Page Up/Down", 10, 410, color.white(200))
+    demo_gui:AddLabel("- Focus: Click a listbox to enable keyboard navigation (blue border)", 10, 430, color.white(200))
+    demo_gui:AddLabel("- All selections are auto-saved", 10, 450, color.white(200))
 end
 
 -- ==================== MENU ELEMENTS ====================
@@ -224,17 +135,10 @@ end
 
 -- ==================== MENU CALLBACK ====================
 local function on_render_menu()
-    -- Add main menu controls here if needed
+    -- Add menu rendering here if needed
 end
 
--- ==================== PLUGIN REGISTRATION ====================
-
--- Register callbacks
+-- ==================== REGISTER CALLBACKS ====================
 core.register_on_update_callback(on_update)
 core.register_on_render_callback(on_render)
 core.register_on_render_menu_callback(on_render_menu)
-
--- Load clean demo (no images)
-require("demo_labels_no_images")
-
-core.log("LX Debug plugin loaded successfully - Full GUI Demo Ready")

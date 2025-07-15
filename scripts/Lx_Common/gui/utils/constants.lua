@@ -32,7 +32,16 @@ local mouse_state = {
     left_button_clicked = false,
     last_left_button_state = false,
     was_down_last_frame = false,
-    is_over_gui = false  -- Track if mouse is over any GUI element
+    is_over_gui = false,  -- Track if mouse is over any GUI element
+    
+    -- Mouse wheel state tracking
+    wheel_up_pressed = false,
+    wheel_down_pressed = false,
+    last_wheel_up_state = false,
+    last_wheel_down_state = false,
+    
+    -- Modifier keys
+    ctrl_pressed = false
 }
 
 -- Export everything
@@ -47,5 +56,7 @@ return {
     gui_states = gui_states,
     selection_bar_enabled = selection_bar_enabled,
     blocking_window = blocking_window,
-    mouse_state = mouse_state
+    mouse_state = mouse_state,
+    key_debug_active = false,  -- Key debug system state
+    debug_last_keys = {}       -- Tracks last key states for debug
 } 

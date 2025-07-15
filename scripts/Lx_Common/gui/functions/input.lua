@@ -4,6 +4,8 @@ local constants = require("gui/utils/constants")
 local helpers = require("gui/utils/helpers")
 local vec2 = constants.vec2
 
+
+
 -- Update mouse input state
 local function update_mouse_state()
     -- Get current mouse position
@@ -21,9 +23,28 @@ local function update_mouse_state()
     constants.mouse_state.left_button_down = current_left_button_state
     constants.mouse_state.last_left_button_state = current_left_button_state
     
+    -- Keyboard scrolling alternatives (Page Up/Down and Arrow keys)
+    local wheel_up_page = core.input.is_key_pressed(0x21)   -- VK_PRIOR (Page Up)
+    local wheel_down_page = core.input.is_key_pressed(0x22) -- VK_NEXT (Page Down)
+    
+    -- Detect wheel events (pressed this frame)
+    constants.mouse_state.wheel_up_pressed = wheel_up_page and not constants.mouse_state.last_wheel_up_state
+    constants.mouse_state.wheel_down_pressed = wheel_down_page and not constants.mouse_state.last_wheel_down_state
+    
+    -- Update wheel states
+    constants.mouse_state.last_wheel_up_state = wheel_up_page
+    constants.mouse_state.last_wheel_down_state = wheel_down_page
+    
+    -- Update Ctrl key state
+    constants.mouse_state.ctrl_pressed = core.input.is_key_pressed(0x11) -- VK_CONTROL
+    
     -- Update GUI area tracking
     constants.mouse_state.is_over_gui = helpers.is_mouse_over_gui_area()
+    
+
 end
+
+
 
 -- Process mouse input for a specific area (returns true if clicked and should process)
 local function process_mouse_input(x, y, width, height)

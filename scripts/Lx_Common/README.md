@@ -31,6 +31,7 @@ LxCommon is a comprehensive GUI system designed for game plugins, providing a co
 - **Headers**: Section headers for organizing content
 - **Tree Nodes**: Collapsible content sections
 - **Images**: Image rendering support (if available in environment)
+- **Listboxes**: Interactive scrollable lists with single/multi-select, auto-save, smooth scrollbar dragging, keyboard wheel alternatives (Page Up/Down, +/- keys), and dynamic content management
 
 ### Persistence System ⭐ **COMPLETE & ROBUST**
 - **Auto-Save**: Configurable automatic saving for all components with immediate persistence
@@ -201,6 +202,75 @@ my_gui:AddLabel("Animated Text", 10, 240, {
 })
 ```
 
+#### Interactive Listbox
+```lua
+-- Basic single-select listbox with auto-save
+local fruit_list = my_gui:AddListbox("Select Fruit", 10, 160, 
+    {"Apple", "Banana", "Cherry", "Date", "Elderberry"}, 
+    1, -- Default selection (Apple)
+    function(index, item)
+        core.log("Selected: " .. (item or "None") .. " at index " .. index)
+    end, {
+        width = 150,
+        height = 100,
+        visible_items = 5,  -- Show 5 items at once
+        auto_save = true    -- Save selection between sessions
+    })
+```
+
+#### Multi-Select Listbox
+```lua
+-- Multi-selection listbox with dynamic content
+local skills_list = my_gui:AddListbox("Select Skills", 10, 280,
+    {"Combat", "Magic", "Stealth", "Crafting", "Exploration"}, 
+    0, -- No default selection
+    function(index, item)
+        local selected_skills = my_gui:GetListboxMultiSelection(skills_list)
+        core.log("Selected skills count: " .. #selected_skills)
+    end, {
+        width = 180,
+        height = 120,
+        visible_items = 6,
+        multi_select = true,  -- Enable multi-selection
+        text_color = color.new(200, 255, 200, 255)
+    })
+
+-- Get all selected items
+local selected_indices = my_gui:GetListboxMultiSelection(skills_list)
+for _, index in ipairs(selected_indices) do
+    local skill_name = skills_list.items[index]
+    core.log("Selected skill: " .. skill_name)
+end
+```
+
+#### Scrollable Listbox with Dynamic Content
+```lua
+-- Large scrollable list with dynamic management
+local log_items = {}
+for i = 1, 100 do
+    table.insert(log_items, "Log Entry " .. i)
+end
+
+local log_listbox = my_gui:AddListbox("Game Log", 10, 200, log_items, 0, 
+    function(index, item)
+        core.log("Viewing log: " .. (item or "None"))
+    end, {
+        width = 250,
+        height = 150,
+        visible_items = 8,  -- Show 8 items, scroll for more
+        auto_save = false   -- Don't save log selection
+    })
+
+-- Dynamic content management
+my_gui:AddListboxItems(log_listbox, {"New Log Entry", "Another Entry"})  -- Add items
+my_gui:ClearListbox(log_listbox)  -- Clear all items
+my_gui:SetListboxSelection(log_listbox, 5)  -- Select specific item
+
+-- Get current selection
+local selected_index = my_gui:GetListboxSelection(log_listbox)
+local selected_item = my_gui:GetListboxSelectedItem(log_listbox)
+```
+
 ## Auto-Save System
 
 The LxCommon GUI framework includes a comprehensive auto-save system that automatically persists user settings across sessions.
@@ -289,6 +359,7 @@ my_gui:SetAutoSave(true)   -- Enable
 - `AddHeader(text, x, y, options)` - Add section header
 - `AddTreeNode(text, x, y, render_callback, options)` - Add collapsible section
 - `AddImage(image_data, x, y, width, height, options)` - Add image
+- `AddListbox(text, x, y, items, default_selected, callback, options)` - Add interactive listbox
 
 #### Utility Methods
 - `GetCheckboxValue(checkbox_info)` - Get checkbox state
@@ -298,6 +369,12 @@ my_gui:SetAutoSave(true)   -- Enable
 - `GetKeybindValue(keybind_info)` - Get keybind state
 - `GetColorPickerValue(colorpicker_info)` - Get color value
 - `GetTextInputValue(textinput_info)` - Get text content
+- `GetListboxSelection(listbox_info)` - Get selected index
+- `GetListboxSelectedItem(listbox_info)` - Get selected item text
+- `GetListboxMultiSelection(listbox_info)` - Get all selected indices (multi-select)
+- `SetListboxSelection(listbox_info, index)` - Set selection programmatically
+- `AddListboxItems(listbox_info, items_array)` - Add items to listbox
+- `ClearListbox(listbox_info)` - Clear all items from listbox
 
 #### Persistence Methods
 - `SaveComponentValue(type, id, value)` - Save component value manually
@@ -328,6 +405,7 @@ end
 - **Comboboxes**: Auto-save enabled by default (opt-out with `auto_save = false`)
 - **Color Pickers**: Auto-save enabled by default (opt-out with `auto_save = false`)
 - **Sliders**: Auto-save enabled by default (opt-out with `auto_save = false`)
+- **Listboxes**: Auto-save enabled by default (opt-out with `auto_save = false`)
 - **Text Inputs**: Auto-save disabled by default (opt-in with `auto_save = true`)
 
 ### File Storage

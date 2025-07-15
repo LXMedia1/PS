@@ -41,6 +41,7 @@ function Menu:new(name, width, height, unique_plugin_key)
         headers = {},  -- Store headers for this GUI
         tree_nodes = {},  -- Store tree nodes for this GUI
         key_checkboxes = {},  -- Store key checkboxes for this GUI
+        listboxes = {},  -- Store listboxes for this GUI
         menu_components = {},  -- Store actual menu components
         component_counter = 0,  -- For unique IDs
         unique_plugin_key = unique_plugin_key,  -- Unique identifier for this plugin
@@ -699,6 +700,93 @@ function Menu:AddKeyCheckbox(text, x, y, default_key, default_state, callback, o
     return keycheckbox_info
 end
 
+-- Add an interactive listbox with scrolling and selection functionality
+-- text: Label text for the listbox
+-- x, y: Position coordinates
+-- items: Array of strings to display in the list
+-- default_selected: Default selected index (0 for none selected)
+-- callback: Function called when selection changes: callback(selected_index, selected_item)
+-- options: Table with optional parameters:
+--   - width, height: Listbox dimensions (default: 200x100)
+--   - text_color: Color of the text
+--   - visible_items: Number of items visible at once (default: 5)
+--   - multi_select: Allow multiple selections (default: false)
+--   - auto_save: Auto-save selection (default: true)
+--
+-- Features:
+--   - Scrollable list with mouse wheel support
+--   - Click to select items
+--   - Hover highlighting
+--   - Visual scrollbar
+--   - Multi-selection support (Ctrl+Click)
+--   - Auto-save functionality
+--   - Keyboard navigation (up/down arrows when focused)
+function Menu:AddListbox(text, x, y, items, default_selected, callback, options)
+    options = options or {}
+    
+    -- Create unique ID for this listbox
+    local listbox_id = options.id or self:generate_id("listbox")
+    
+    -- Load saved selection (only if auto_save is enabled for this component)
+    local saved_selection = default_selected or 0
+    if options.auto_save ~= false then  -- Default to true unless explicitly disabled
+        saved_selection = self:LoadComponentValue("listbox", listbox_id, default_selected or 0)
+    end
+    
+    -- Store the listbox info
+    local listbox_info = {
+        text = text,
+        x = x,
+        y = y,
+        id = listbox_id,
+        items = items or {},
+        selected_index = saved_selection,  -- Currently selected item index (0 = none)
+        selected_indices = {},  -- For multi-select mode
+        width = options.width or 200,
+        height = options.height or 100,
+        visible_items = options.visible_items or 5,
+        text_color = options.text_color or color.white(255),
+        multi_select = options.multi_select or false,
+        auto_save = options.auto_save ~= false,  -- Default to true unless explicitly disabled
+        callback = callback,
+        
+        -- Scrolling state
+        scroll_offset = 0,  -- Number of items scrolled from top
+        max_scroll = 0,     -- Maximum scroll offset
+        
+        -- Visual state
+        is_focused = false,
+        hovered_index = 0,  -- Index of item being hovered (0 = none)
+        
+        -- Item dimensions
+        item_height = 18,   -- Height per item
+        
+        -- Key state tracking for navigation
+        up_key_was_pressed = false,
+        down_key_was_pressed = false,
+        
+        -- Scrollbar drag state
+        scrollbar_dragging = false,
+        
+        gui_ref = self  -- Reference to GUI for saving
+    }
+    
+    -- Initialize multi-select if enabled
+    if listbox_info.multi_select then
+        listbox_info.selected_indices = {}
+        if saved_selection > 0 and saved_selection <= #items then
+            listbox_info.selected_indices[saved_selection] = true
+        end
+    end
+    
+    -- Calculate max scroll based on items and visible area
+    listbox_info.max_scroll = math.max(0, #items - listbox_info.visible_items)
+    
+    table.insert(self.listboxes, listbox_info)
+    
+    return listbox_info
+end
+
 function Menu:AddImage(image_data, x, y, width, height, options)
     options = options or {}
     
@@ -989,6 +1077,77 @@ end
 function Menu:SetAutoSave(enabled)
     self.auto_save_enabled = enabled
     core.log("Auto-save " .. (enabled and "enabled" or "disabled") .. " for GUI: " .. self.name)
+end
+
+-- Get the selected index from a listbox
+function Menu:GetListboxSelection(listbox_info)
+    if listbox_info then
+        return listbox_info.selected_index or 0
+    end
+    return 0
+end
+
+-- Get the selected item text from a listbox
+function Menu:GetListboxSelectedItem(listbox_info)
+    if listbox_info and listbox_info.selected_index > 0 and listbox_info.selected_index <= #listbox_info.items then
+        return listbox_info.items[listbox_info.selected_index]
+    end
+    return nil
+end
+
+-- Set the selected index for a listbox
+function Menu:SetListboxSelection(listbox_info, index)
+    if listbox_info and index >= 0 and index <= #listbox_info.items then
+        listbox_info.selected_index = index
+        
+        -- Auto-save if enabled
+        if listbox_info.auto_save and listbox_info.gui_ref and listbox_info.gui_ref.SaveComponentValue then
+            listbox_info.gui_ref:SaveComponentValue("listbox", listbox_info.id, index)
+        end
+        
+        -- Call callback if provided
+        if listbox_info.callback then
+            local selected_item = index > 0 and listbox_info.items[index] or nil
+            listbox_info.callback(index, selected_item)
+        end
+    end
+end
+
+-- Get all selected indices for multi-select listbox
+function Menu:GetListboxMultiSelection(listbox_info)
+    if listbox_info and listbox_info.multi_select then
+        local selected = {}
+        for index, is_selected in pairs(listbox_info.selected_indices) do
+            if is_selected then
+                table.insert(selected, index)
+            end
+        end
+        return selected
+    end
+    return {}
+end
+
+-- Add items to a listbox
+function Menu:AddListboxItems(listbox_info, new_items)
+    if listbox_info and new_items then
+        for _, item in ipairs(new_items) do
+            table.insert(listbox_info.items, item)
+        end
+        -- Recalculate max scroll
+        listbox_info.max_scroll = math.max(0, #listbox_info.items - listbox_info.visible_items)
+    end
+end
+
+-- Clear all items from a listbox
+function Menu:ClearListbox(listbox_info)
+    if listbox_info then
+        listbox_info.items = {}
+        listbox_info.selected_index = 0
+        listbox_info.selected_indices = {}
+        listbox_info.scroll_offset = 0
+        listbox_info.max_scroll = 0
+        listbox_info.hovered_index = 0
+    end
 end
 
 -- Export the Menu class

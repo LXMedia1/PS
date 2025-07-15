@@ -92,12 +92,13 @@ local function render_gui_content(gui)
     local has_headers = gui.headers and #gui.headers > 0
     local has_tree_nodes = gui.tree_nodes and #gui.tree_nodes > 0
     local has_key_checkboxes = gui.key_checkboxes and #gui.key_checkboxes > 0
+    local has_listboxes = gui.listboxes and #gui.listboxes > 0
     
     if not gui.render_callback and #gui.labels == 0 and #gui.buttons == 0 and not has_images 
         and not has_checkboxes and not has_sliders_int and not has_sliders_float 
         and not has_comboboxes and not has_keybinds and not has_colorpickers 
         and not has_text_inputs and not has_headers and not has_tree_nodes
-        and not has_key_checkboxes then 
+        and not has_key_checkboxes and not has_listboxes then 
         return 
     end
     
@@ -2510,6 +2511,334 @@ local function render_gui_content(gui)
                         false
                     )
                 end
+            end
+        end
+        
+        -- Render all listboxes with full interactivity
+        for _, listbox in ipairs(gui.listboxes) do
+            local lb_x = gui.x_offset + listbox.x
+            local lb_y = base_y + listbox.y
+            
+            -- Initialize state if not set
+            if listbox.scroll_offset == nil then
+                listbox.scroll_offset = 0
+            end
+            if listbox.hovered_index == nil then
+                listbox.hovered_index = 0
+            end
+            if listbox.is_focused == nil then
+                listbox.is_focused = false
+            end
+            
+            -- Calculate item height and visible area
+            local item_height = listbox.item_height or 18
+            local visible_items = listbox.visible_items or 5
+            local actual_height = math.min(listbox.height, visible_items * item_height)
+            
+            -- Recalculate max scroll
+            listbox.max_scroll = math.max(0, #listbox.items - visible_items)
+            
+            -- Check for focus (click inside listbox area)
+            local is_hovered = helpers.is_point_in_rect(constants.mouse_state.position.x, constants.mouse_state.position.y, 
+                                                        lb_x, lb_y, listbox.width, actual_height)
+            local is_clicked = is_hovered and constants.mouse_state.left_button_clicked
+            
+            if is_clicked then
+                listbox.is_focused = true
+                -- Calculate which item was clicked
+                local relative_y = constants.mouse_state.position.y - lb_y
+                local clicked_item_index = math.floor(relative_y / item_height) + 1 + listbox.scroll_offset
+                
+                if clicked_item_index >= 1 and clicked_item_index <= #listbox.items then
+                    if listbox.multi_select then
+                        -- Multi-select mode: toggle selection
+                        if not listbox.selected_indices then
+                            listbox.selected_indices = {}
+                        end
+                        
+                        -- Check if Ctrl is held for multi-selection
+                        if constants.mouse_state.ctrl_pressed then
+                            -- Ctrl+Click: Toggle individual items
+                            listbox.selected_indices[clicked_item_index] = not listbox.selected_indices[clicked_item_index]
+                        else
+                            -- Normal click in multi-select: Clear all and select only this item
+                            listbox.selected_indices = {}
+                            listbox.selected_indices[clicked_item_index] = true
+                        end
+                        
+                        -- For multi-select, call callback with all selected items
+                        if listbox.callback then
+                            local selected_items = {}
+                            for index, selected in pairs(listbox.selected_indices) do
+                                if selected then
+                                    table.insert(selected_items, {index = index, item = listbox.items[index]})
+                                end
+                            end
+                            listbox.callback(selected_items)
+                        end
+                    else
+                        -- Single-select mode: set selection
+                        listbox.selected_index = clicked_item_index
+                        
+                        -- Auto-save if enabled
+                        if listbox.auto_save and listbox.gui_ref and listbox.gui_ref.SaveComponentValue then
+                            listbox.gui_ref:SaveComponentValue("listbox", listbox.id, clicked_item_index)
+                        end
+                        
+                        -- Call callback
+                        if listbox.callback then
+                            listbox.callback(clicked_item_index, listbox.items[clicked_item_index])
+                        end
+                    end
+                end
+            else
+                -- Focus management - lose focus if clicking outside
+                if constants.mouse_state.left_button_clicked then
+                    listbox.is_focused = false
+                end
+            end
+            
+            -- Scrollbar interaction when there are enough items to scroll
+            if #listbox.items > visible_items then
+                local scrollbar_width = 8
+                local scrollbar_x = lb_x + listbox.width - scrollbar_width - 2
+                local scrollbar_y = lb_y + 2
+                local scrollbar_height = actual_height - 4
+                
+                -- Check for scrollbar interaction
+                local scrollbar_hovered = helpers.is_point_in_rect(constants.mouse_state.position.x, constants.mouse_state.position.y, 
+                                                                  scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height)
+                local scrollbar_pressed = scrollbar_hovered and constants.mouse_state.left_button_down and not constants.mouse_state.was_down_last_frame
+                
+                -- Initialize scrollbar drag state if not exists
+                if listbox.scrollbar_dragging == nil then
+                    listbox.scrollbar_dragging = false
+                end
+                
+                -- Start dragging on press
+                if scrollbar_pressed then
+                    listbox.scrollbar_dragging = true
+                end
+                
+                -- Stop dragging when mouse is released
+                if listbox.scrollbar_dragging and not constants.mouse_state.left_button_down then
+                    listbox.scrollbar_dragging = false
+                end
+                
+                -- Update scroll position while dragging or on initial click
+                if (scrollbar_hovered and constants.mouse_state.left_button_clicked) or 
+                   (listbox.scrollbar_dragging and constants.mouse_state.left_button_down) then
+                    -- Calculate scroll position based on mouse position
+                    local relative_y = constants.mouse_state.position.y - scrollbar_y
+                    local scroll_ratio = math.max(0, math.min(1, relative_y / scrollbar_height))
+                    local new_scroll_offset = math.floor(scroll_ratio * listbox.max_scroll)
+                    listbox.scroll_offset = math.max(0, math.min(new_scroll_offset, listbox.max_scroll))
+                end
+            end
+            
+            -- Keyboard wheel-like scrolling when hovered (Page Up/Down only)
+            if is_hovered and #listbox.items > visible_items then
+                -- Scroll up (Page Up key)
+                if constants.mouse_state.wheel_up_pressed then
+                    listbox.scroll_offset = math.max(0, listbox.scroll_offset - 3) -- Scroll up 3 items
+                end
+                
+                -- Scroll down (Page Down key)
+                if constants.mouse_state.wheel_down_pressed then
+                    listbox.scroll_offset = math.min(listbox.max_scroll, listbox.scroll_offset + 3) -- Scroll down 3 items
+                end
+            end
+            
+            -- Keyboard navigation when focused
+            if listbox.is_focused then
+                -- Up arrow key navigation
+                if core.input.is_key_pressed(0x26) then -- VK_UP
+                    if not listbox.up_key_was_pressed then
+                        listbox.up_key_was_pressed = true
+                        if listbox.selected_index and listbox.selected_index > 1 then
+                            local new_selection = listbox.selected_index - 1
+                            listbox.selected_index = new_selection
+                            
+                            -- Auto-scroll to keep selection visible
+                            if new_selection <= listbox.scroll_offset then
+                                listbox.scroll_offset = math.max(0, new_selection - 1)
+                            end
+                            
+                            -- Auto-save and callback
+                            if listbox.auto_save and listbox.gui_ref and listbox.gui_ref.SaveComponentValue then
+                                listbox.gui_ref:SaveComponentValue("listbox", listbox.id, new_selection)
+                            end
+                            if listbox.callback then
+                                listbox.callback(new_selection, listbox.items[new_selection])
+                            end
+                        end
+                    end
+                else
+                    listbox.up_key_was_pressed = false
+                end
+                
+                -- Down arrow key navigation
+                if core.input.is_key_pressed(0x28) then -- VK_DOWN
+                    if not listbox.down_key_was_pressed then
+                        listbox.down_key_was_pressed = true
+                        if listbox.selected_index and listbox.selected_index < #listbox.items then
+                            local new_selection = listbox.selected_index + 1
+                            listbox.selected_index = new_selection
+                            
+                            -- Auto-scroll to keep selection visible
+                            if new_selection > listbox.scroll_offset + visible_items then
+                                listbox.scroll_offset = math.min(listbox.max_scroll, new_selection - visible_items)
+                            end
+                            
+                            -- Auto-save and callback
+                            if listbox.auto_save and listbox.gui_ref and listbox.gui_ref.SaveComponentValue then
+                                listbox.gui_ref:SaveComponentValue("listbox", listbox.id, new_selection)
+                            end
+                            if listbox.callback then
+                                listbox.callback(new_selection, listbox.items[new_selection])
+                            end
+                        end
+                    end
+                else
+                    listbox.down_key_was_pressed = false
+                end
+            end
+            
+            -- Update hovered item
+            if is_hovered then
+                local relative_y = constants.mouse_state.position.y - lb_y
+                listbox.hovered_index = math.floor(relative_y / item_height) + 1 + listbox.scroll_offset
+                if listbox.hovered_index < 1 or listbox.hovered_index > #listbox.items then
+                    listbox.hovered_index = 0
+                end
+            else
+                listbox.hovered_index = 0
+            end
+            
+            -- Render label
+            core.graphics.text_2d(
+                listbox.text .. ":",
+                vec2.new(lb_x, lb_y - 20),
+                constants.FONT_SIZE,
+                listbox.text_color,
+                false
+            )
+            
+            -- Render listbox background
+            core.graphics.rect_2d_filled(
+                vec2.new(lb_x, lb_y),
+                listbox.width, actual_height,
+                color.new(30, 30, 30, 255),
+                2
+            )
+            
+            -- Render listbox border
+            local border_color = listbox.is_focused and color.new(80, 120, 200, 255) or color.new(60, 60, 60, 255)
+            core.graphics.rect_2d(
+                vec2.new(lb_x, lb_y),
+                listbox.width, actual_height,
+                border_color,
+                listbox.is_focused and 2 or 1, 2
+            )
+            
+            -- Render visible items
+            for i = 1, visible_items do
+                local item_index = i + listbox.scroll_offset
+                if item_index <= #listbox.items then
+                    local item_text = listbox.items[item_index]
+                    local item_x = lb_x + 5
+                    local item_y = lb_y + (i - 1) * item_height + 2
+                    
+                    -- Determine item colors
+                    local item_bg = nil
+                    local item_text_color = listbox.text_color
+                    
+                    -- Check if selected
+                    local is_selected = false
+                    if listbox.multi_select then
+                        is_selected = listbox.selected_indices and listbox.selected_indices[item_index]
+                    else
+                        is_selected = (listbox.selected_index == item_index)
+                    end
+                    
+                    -- Check if hovered
+                    local is_item_hovered = (listbox.hovered_index == item_index)
+                    
+                    -- Background colors
+                    if is_selected then
+                        item_bg = color.new(60, 90, 140, 255)  -- Selected - blue
+                        item_text_color = color.white(255)
+                    elseif is_item_hovered then
+                        item_bg = color.new(50, 50, 50, 255)   -- Hovered - light gray
+                        item_text_color = color.new(255, 255, 200, 255)
+                    end
+                    
+                    -- Render item background if needed
+                    if item_bg then
+                        core.graphics.rect_2d_filled(
+                            vec2.new(lb_x + 1, item_y - 2),
+                            listbox.width - 2, item_height,
+                            item_bg,
+                            0
+                        )
+                    end
+                    
+                    -- Render item text
+                    core.graphics.text_2d(
+                        item_text,
+                        vec2.new(item_x, item_y),
+                        constants.FONT_SIZE,
+                        item_text_color,
+                        false
+                    )
+                end
+            end
+            
+            -- Render scrollbar if needed
+            if #listbox.items > visible_items then
+                local scrollbar_width = 8
+                local scrollbar_x = lb_x + listbox.width - scrollbar_width - 2
+                local scrollbar_y = lb_y + 2
+                local scrollbar_height = actual_height - 4
+                
+                -- Check if scrollbar is hovered for better feedback
+                local scrollbar_hovered = helpers.is_point_in_rect(constants.mouse_state.position.x, constants.mouse_state.position.y, 
+                                                                  scrollbar_x, scrollbar_y, scrollbar_width, scrollbar_height)
+                
+                -- Scrollbar track
+                local track_color = scrollbar_hovered and color.new(50, 50, 50, 255) or color.new(40, 40, 40, 255)
+                core.graphics.rect_2d_filled(
+                    vec2.new(scrollbar_x, scrollbar_y),
+                    scrollbar_width, scrollbar_height,
+                    track_color,
+                    2
+                )
+                
+                -- Scrollbar thumb
+                local thumb_height = math.max(10, (visible_items / #listbox.items) * scrollbar_height)
+                local thumb_y = scrollbar_y + (listbox.scroll_offset / listbox.max_scroll) * (scrollbar_height - thumb_height)
+                
+                -- Better thumb color with drag state feedback
+                local thumb_color = color.new(80, 80, 80, 255) -- Default
+                if listbox.scrollbar_dragging then
+                    thumb_color = color.new(150, 200, 255, 255) -- Bright blue when dragging
+                elseif scrollbar_hovered then
+                    thumb_color = color.new(120, 120, 120, 255) -- Hover color
+                end
+                core.graphics.rect_2d_filled(
+                    vec2.new(scrollbar_x + 1, thumb_y),
+                    scrollbar_width - 2, thumb_height,
+                    thumb_color,
+                    2
+                )
+                
+                -- Add scrollbar border for better visibility
+                core.graphics.rect_2d(
+                    vec2.new(scrollbar_x, scrollbar_y),
+                    scrollbar_width, scrollbar_height,
+                    color.new(60, 60, 60, 255),
+                    1, 2
+                )
             end
         end
     end
