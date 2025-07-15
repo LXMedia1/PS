@@ -729,8 +729,44 @@ function Menu:AddListbox(text, x, y, items, default_selected, callback, options)
     
     -- Load saved selection (only if auto_save is enabled for this component)
     local saved_selection = default_selected or 0
+    local saved_multi_selections = {}
     if options.auto_save ~= false then  -- Default to true unless explicitly disabled
-        saved_selection = self:LoadComponentValue("listbox", listbox_id, default_selected or 0)
+        if options.multi_select then
+            -- For multi-select, load the selected indices table
+            local saved_multi_str = self:LoadComponentValue("listbox_multi", listbox_id, "")
+            -- Ensure the value is always a string
+            if saved_multi_str then
+                saved_multi_str = tostring(saved_multi_str)
+            end
+            if saved_multi_str and saved_multi_str ~= "" and saved_multi_str ~= "nil" then
+                -- Parse comma-separated indices: "1,3,5"
+                for index_str in saved_multi_str:gmatch("[^,]+") do
+                    local index = tonumber(index_str)
+                    if index then
+                        saved_multi_selections[index] = true
+                    end
+                end
+                core.log("DEBUG: Loaded multi-select listbox '" .. text .. "' selections: " .. saved_multi_str)
+            end
+        else
+            -- For single-select, load the selected index
+            saved_selection = self:LoadComponentValue("listbox", listbox_id, default_selected or 0)
+            core.log("DEBUG: Loaded single-select listbox '" .. text .. "' selection: " .. tostring(saved_selection))
+        end
+    end
+    
+    -- Load saved items if auto-save is enabled
+    local final_items = items or {}
+    if options.auto_save ~= false then  -- Default to true unless explicitly disabled
+        local saved_items_str = self:LoadComponentValue("listbox_items", listbox_id, "")
+        if saved_items_str and saved_items_str ~= "" then
+            -- Parse pipe-separated items: "item1|item2|item3"
+            final_items = {}
+            for item in saved_items_str:gmatch("[^|]+") do
+                table.insert(final_items, item)
+            end
+            core.log("DEBUG: Loaded listbox '" .. text .. "' items: " .. saved_items_str)
+        end
     end
     
     -- Store the listbox info
@@ -739,7 +775,7 @@ function Menu:AddListbox(text, x, y, items, default_selected, callback, options)
         x = x,
         y = y,
         id = listbox_id,
-        items = items or {},
+        items = final_items,
         selected_index = saved_selection,  -- Currently selected item index (0 = none)
         selected_indices = {},  -- For multi-select mode
         width = options.width or 200,
@@ -773,14 +809,17 @@ function Menu:AddListbox(text, x, y, items, default_selected, callback, options)
     
     -- Initialize multi-select if enabled
     if listbox_info.multi_select then
-        listbox_info.selected_indices = {}
-        if saved_selection > 0 and saved_selection <= #items then
-            listbox_info.selected_indices[saved_selection] = true
+        listbox_info.selected_indices = saved_multi_selections  -- Use loaded multi-selections
+        -- Count selected items
+        local count = 0
+        for _ in pairs(saved_multi_selections) do
+            count = count + 1
         end
+        core.log("DEBUG: Initialized multi-select with " .. count .. " selections")
     end
     
     -- Calculate max scroll based on items and visible area
-    listbox_info.max_scroll = math.max(0, #items - listbox_info.visible_items)
+    listbox_info.max_scroll = math.max(0, #final_items - listbox_info.visible_items)
     
     table.insert(self.listboxes, listbox_info)
     
@@ -962,6 +1001,7 @@ function Menu:SaveDataToFile()
     end
     
     local filename = self:GenerateSaveFilename()
+    core.log("DEBUG: Saving to file: " .. filename)
     -- Convert save_data table to a simple string format
     local data_lines = {}
     for key, value in pairs(self.save_data) do
@@ -1130,23 +1170,45 @@ end
 -- Add items to a listbox
 function Menu:AddListboxItems(listbox_info, new_items)
     if listbox_info and new_items then
+        core.log("DEBUG: Adding " .. #new_items .. " items to listbox")
         for _, item in ipairs(new_items) do
             table.insert(listbox_info.items, item)
+            core.log("DEBUG: Added item: " .. item)
         end
         -- Recalculate max scroll
         listbox_info.max_scroll = math.max(0, #listbox_info.items - listbox_info.visible_items)
+        core.log("DEBUG: Listbox now has " .. #listbox_info.items .. " items, max_scroll: " .. listbox_info.max_scroll)
+        
+        -- Auto-save the updated items list if enabled
+        if listbox_info.auto_save and listbox_info.gui_ref and listbox_info.gui_ref.SaveComponentValue then
+            local items_str = table.concat(listbox_info.items, "|")  -- Use | as separator since items may contain commas
+            listbox_info.gui_ref:SaveComponentValue("listbox_items", listbox_info.id, items_str)
+            core.log("DEBUG: Auto-saved listbox items: " .. items_str)
+        end
+    else
+        core.log("DEBUG: AddListboxItems called with invalid parameters")
     end
 end
 
 -- Clear all items from a listbox
 function Menu:ClearListbox(listbox_info)
     if listbox_info then
+        core.log("DEBUG: Clearing listbox with " .. #listbox_info.items .. " items")
         listbox_info.items = {}
         listbox_info.selected_index = 0
         listbox_info.selected_indices = {}
         listbox_info.scroll_offset = 0
         listbox_info.max_scroll = 0
         listbox_info.hovered_index = 0
+        core.log("DEBUG: Listbox cleared")
+        
+        -- Auto-save the cleared items list if enabled
+        if listbox_info.auto_save and listbox_info.gui_ref and listbox_info.gui_ref.SaveComponentValue then
+            listbox_info.gui_ref:SaveComponentValue("listbox_items", listbox_info.id, "")
+            core.log("DEBUG: Auto-saved cleared listbox items")
+        end
+    else
+        core.log("DEBUG: ClearListbox called with invalid listbox_info")
     end
 end
 

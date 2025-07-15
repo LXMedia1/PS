@@ -51,13 +51,13 @@ end
 _G.LxCommon = {
     Menu = Menu,
     Gui = {
-        register = function(name, width, height)
-            return Menu:new(name, width, height)
+        register = function(name, width, height, unique_plugin_key)
+            return Menu:new(name, width, height, unique_plugin_key)
         end
     },
     -- Legacy support
-    registerGui = function(name, width, height)
-        return Menu:new(name, width, height)
+    registerGui = function(name, width, height, unique_plugin_key)
+        return Menu:new(name, width, height, unique_plugin_key)
     end,
     -- Input blocking for other systems
     isInputBlocked = function()

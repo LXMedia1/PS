@@ -19,7 +19,7 @@ local demo_gui = nil
 
 if lx then
     -- Create a clean debug GUI
-    demo_gui = lx.Gui.register("LX Debug", 600, 500)
+    demo_gui = lx.Gui.register("LX Debug", 600, 500, "lx_debug_gui")
     
     -- Header
     demo_gui:AddLabel("LX Debug Panel - Listbox Component Testing", 10, 10, color.white(255))
