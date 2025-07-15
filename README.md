@@ -16,7 +16,7 @@ Project Sylvanas provides a modular framework for creating game plugins with adv
 - **Modular Architecture**: Clean separation of concerns with reusable components
 - **Plugin Ecosystem**: Extensible system for custom plugins and rotations
 - **Persistent Settings**: Automatic save/load system for component states
-- **Debug Tools**: Built-in debugging utilities and test environments
+- **Error Handling**: Robust error handling and user feedback systems
 
 ## Documentation
 

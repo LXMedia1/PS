@@ -1007,22 +1007,6 @@ end)
    - Check color values are within valid ranges (0-255)
    - Verify screen size compatibility
 
-### Debug Mode
-
-Enable comprehensive debug logging:
-
-```lua
--- In constants.lua or main configuration
-Settings.debug_mode = true
-```
-
-**Debug Information Includes:**
-- Auto-save operations and file I/O
-- Component creation and state changes
-- Input blocking state changes
-- Keybind assignment and listening events
-- Color parsing and persistence operations
-
 ### Performance Monitoring
 
 ```lua
