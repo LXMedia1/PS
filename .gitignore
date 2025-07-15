@@ -1,0 +1,20 @@
+*.exe
+assets
+license
+user
+
+# Git files
+.gitignore
+
+# Cursor IDE files
+.cursor/
+.cursorignore
+
+# Text and temporary files
+*.txt
+*.keep
+*.dat
+
+# Testing projects
+
+*.dat
