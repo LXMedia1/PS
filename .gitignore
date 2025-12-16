@@ -4,3 +4,6 @@
 # User-specific data
 wow_settings.dat
 user
+
+# API folder (not for distribution)
+scripts/.api/
