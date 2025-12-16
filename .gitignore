@@ -7,3 +7,14 @@ user
 
 # API folder (not for distribution)
 scripts/.api/
+
+# Encrypted scripts (local only)
+scripts/common
+scripts/core_lua
+scripts/core_universal_kicks
+scripts/core_universal_utility
+scripts/ext_0_plugin_universal_affix
+scripts/ext_0_plugin_universal_dispels
+scripts/ext_0_plugin_universal_items
+scripts/ext_0_plugin_universal_racials
+scripts/ext_0_plugin_universal_reflects
