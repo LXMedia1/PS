@@ -10,5 +10,5 @@ license
 # Scripts data (local only)
 scripts_data/
 
-# API folder (local only)
-scripts/.api/
+# Scripts folder (local only)
+scripts/
