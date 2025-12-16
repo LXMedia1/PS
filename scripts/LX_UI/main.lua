@@ -58,8 +58,8 @@ MenuMeta.__index = Menu
 function Menu:add_label(text, x, y, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
 
     local component = Label:new(options)
@@ -70,8 +70,8 @@ end
 
 function Menu:add_separator(x, y, options)
     options = options or {}
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
 
     local component = Separator:new(options)
@@ -83,8 +83,8 @@ end
 function Menu:add_header(text, x, y, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
 
     local component = Header:new(options)
@@ -96,8 +96,8 @@ end
 function Menu:add_checkbox(text, x, y, default, callback, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
     options.default = default
     options.on_change = callback
@@ -111,8 +111,8 @@ end
 function Menu:add_slider(text, x, y, min, max, default, callback, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
     options.min = min
     options.max = max
@@ -128,8 +128,8 @@ end
 function Menu:add_button(text, x, y, width, height, callback, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = width or 100
     options.height = height or 25
     options.on_click = callback
@@ -143,8 +143,8 @@ end
 function Menu:add_progressbar(text, x, y, value, max_value, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
     options.value = value or 0
     options.max_value = max_value or 100
@@ -158,8 +158,8 @@ end
 function Menu:add_textinput(text, x, y, default, callback, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
     options.default = default
     options.on_change = callback
@@ -173,8 +173,8 @@ end
 function Menu:add_combobox(text, x, y, items, default, callback, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
     options.items = items
     options.default = default
@@ -189,8 +189,8 @@ end
 function Menu:add_keybind(text, x, y, default, callback, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
     options.default = default
     options.on_change = callback
@@ -204,8 +204,8 @@ end
 function Menu:add_colorpicker(text, x, y, default, callback, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
     options.default = default
     options.on_change = callback
@@ -219,8 +219,8 @@ end
 function Menu:add_treenode(text, x, y, default, callback, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
     options.default = default
     options.on_change = callback
@@ -234,8 +234,8 @@ end
 function Menu:add_listbox(text, x, y, items, default, callback, options)
     options = options or {}
     options.text = text
-    options.x = (x or 0) + self.x + constants.Settings.default_padding
-    options.y = (y or self:get_next_y()) + self.y
+    options.x = (x or 0) + constants.Settings.default_padding
+    options.y = (y or self:get_next_y())
     options.width = options.width or (self.width - constants.Settings.default_padding * 2)
     options.height = options.height or 100
     options.items = items

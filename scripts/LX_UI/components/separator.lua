@@ -30,7 +30,9 @@ end
 
 function Separator:render()
     if not self.visible then return end
-    Rendering.separator(self.x, self.y + self.height / 2, self.width)
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
+    Rendering.separator(abs_x, abs_y + self.height / 2, self.width)
 end
 
 function Separator:update()

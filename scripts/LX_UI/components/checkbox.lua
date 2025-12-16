@@ -41,14 +41,16 @@ end
 function Checkbox:render()
     if not self.visible then return end
 
-    local box_y = self.y + (self.height - self.box_size) / 2
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
+    local box_y = abs_y + (self.height - self.box_size) / 2
 
     -- Draw checkbox
-    Rendering.checkbox(self.x, box_y, self.box_size, self.checked, self.is_hovered)
+    Rendering.checkbox(abs_x, box_y, self.box_size, self.checked, self.is_hovered)
 
     -- Draw label
-    local text_x = self.x + self.box_size + 8
-    local text_y = self.y + (self.height - constants.Settings.default_font_size) / 2
+    local text_x = abs_x + self.box_size + 8
+    local text_y = abs_y + (self.height - constants.Settings.default_font_size) / 2
     local text_col = self.enabled and self.text_color or constants.Colors.text_disabled
     Rendering.text(text_x, text_y, self.text, text_col)
 end
@@ -57,7 +59,7 @@ function Checkbox:update()
     if not self:is_active() then return end
 
     local mx, my = Input.get_mouse_pos()
-    self.is_hovered = helpers.point_in_rect(mx, my, self.x, self.y, self.width, self.height)
+    self.is_hovered = self:contains_point(mx, my)
 
     if self.is_hovered and Input.is_left_clicked() then
         self:toggle()

@@ -11,8 +11,8 @@ local function init()
 
     initialized = true
 
-    -- Create main menu window
-    menu = LX_UI.Menu:new("LX_UI Demo", 320, 500, "lx_demo")
+    -- Create main menu window (height auto-adjusts to content)
+    menu = LX_UI.Menu:new("LX_UI Demo", 320, 100, "lx_demo")
 
     -- Header section
     menu:add_header("General Settings")

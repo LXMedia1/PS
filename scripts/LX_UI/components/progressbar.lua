@@ -38,14 +38,16 @@ end
 function ProgressBar:render()
     if not self.visible then return end
 
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
     local percent = self:get_percentage()
-    Rendering.progress_bar(self.x, self.y, self.width, self.height, percent, self.fill_color)
+    Rendering.progress_bar(abs_x, abs_y, self.width, self.height, percent, self.fill_color)
 
     if self.show_text then
         local text = string.format("%.0f%%", percent * 100)
         Rendering.text(
-            self.x + self.width / 2,
-            self.y + (self.height - constants.Settings.default_font_size) / 2,
+            abs_x + self.width / 2,
+            abs_y + (self.height - constants.Settings.default_font_size) / 2,
             text,
             constants.Colors.text,
             nil,

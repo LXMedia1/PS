@@ -82,19 +82,31 @@ function BaseComponent:set_enabled(enabled)
     self.enabled = enabled
 end
 
+-- Get absolute X position (includes parent menu offset)
+function BaseComponent:get_abs_x()
+    local menu_x = self.parent_menu and self.parent_menu.x or 0
+    return self.x + menu_x
+end
+
+-- Get absolute Y position (includes parent menu offset)
+function BaseComponent:get_abs_y()
+    local menu_y = self.parent_menu and self.parent_menu.y or 0
+    return self.y + menu_y
+end
+
 -- Get bounds as table
 function BaseComponent:get_bounds()
     return {
-        x = self.x,
-        y = self.y,
+        x = self:get_abs_x(),
+        y = self:get_abs_y(),
         width = self.width,
         height = self.height
     }
 end
 
--- Check if point is inside component
+-- Check if point is inside component (uses absolute position)
 function BaseComponent:contains_point(px, py)
-    return helpers.point_in_rect(px, py, self.x, self.y, self.width, self.height)
+    return helpers.point_in_rect(px, py, self:get_abs_x(), self:get_abs_y(), self.width, self.height)
 end
 
 -- Update hover state based on mouse position

@@ -53,21 +53,23 @@ end
 function ColorPicker:render()
     if not self.visible then return end
 
-    local preview_x = self.x + self.width - self.preview_size
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
+    local preview_x = abs_x + self.width - self.preview_size
 
     -- Draw label
     if self.text and self.text ~= "" then
-        Rendering.text(self.x, self.y + 4, self.text, constants.Colors.text)
+        Rendering.text(abs_x, abs_y + 4, self.text, constants.Colors.text)
     end
 
     -- Draw color preview
     local preview_color = constants.color.new(self.r, self.g, self.b, self.a)
-    Rendering.rect_filled(preview_x, self.y, self.preview_size, self.preview_size, preview_color, 2)
-    Rendering.rect(preview_x, self.y, self.preview_size, self.preview_size, constants.Colors.border, 1, 2)
+    Rendering.rect_filled(preview_x, abs_y, self.preview_size, self.preview_size, preview_color, 2)
+    Rendering.rect(preview_x, abs_y, self.preview_size, self.preview_size, constants.Colors.border, 1, 2)
 
     -- Draw expanded picker if open
     if self.is_open then
-        local picker_y = self.y + self.height + 4
+        local picker_y = abs_y + self.height + 4
         local picker_width = 180
         local picker_height = 120
 
@@ -109,17 +111,19 @@ end
 function ColorPicker:update()
     if not self:is_active() then return end
 
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
     local mx, my = Input.get_mouse_pos()
-    local preview_x = self.x + self.width - self.preview_size
+    local preview_x = abs_x + self.width - self.preview_size
 
-    self.is_hovered = helpers.point_in_rect(mx, my, preview_x, self.y, self.preview_size, self.preview_size)
+    self.is_hovered = helpers.point_in_rect(mx, my, preview_x, abs_y, self.preview_size, self.preview_size)
 
     if Input.is_left_clicked() then
         if self.is_hovered then
             self.is_open = not self.is_open
         elseif self.is_open then
             -- Check if clicking on sliders
-            local picker_y = self.y + self.height + 4
+            local picker_y = abs_y + self.height + 4
             local picker_width = 180
             local slider_x = preview_x - picker_width + self.preview_size + 30
             local slider_w = picker_width - 50

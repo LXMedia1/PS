@@ -37,12 +37,14 @@ end
 function Label:render()
     if not self.visible then return end
 
-    local text_x = self.x
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
+    local text_x = abs_x
     if self.centered then
-        text_x = self.x + self.width / 2
+        text_x = abs_x + self.width / 2
     end
 
-    Rendering.text(text_x, self.y, self.text, self.text_color, self.font_size, self.centered)
+    Rendering.text(text_x, abs_y, self.text, self.text_color, self.font_size, self.centered)
 end
 
 function Label:update()

@@ -40,14 +40,16 @@ end
 function Button:render()
     if not self.visible then return end
 
-    Rendering.button(self.x, self.y, self.width, self.height, self.text, self.is_hovered, self.is_pressed)
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
+    Rendering.button(abs_x, abs_y, self.width, self.height, self.text, self.is_hovered, self.is_pressed)
 end
 
 function Button:update()
     if not self:is_active() then return end
 
     local mx, my = Input.get_mouse_pos()
-    self.is_hovered = helpers.point_in_rect(mx, my, self.x, self.y, self.width, self.height)
+    self.is_hovered = self:contains_point(mx, my)
 
     -- Track press state
     if self.is_hovered and Input.is_left_down() then

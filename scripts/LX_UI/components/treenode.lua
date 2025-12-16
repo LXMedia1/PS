@@ -42,31 +42,33 @@ end
 function TreeNode:render()
     if not self.visible then return end
 
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
     local mx, my = Input.get_mouse_pos()
-    local actual_x = self.x + (self.indent * self.indent_size)
-    self.is_hovered = helpers.point_in_rect(mx, my, actual_x, self.y, self.width - (self.indent * self.indent_size), self.height)
+    local actual_x = abs_x + (self.indent * self.indent_size)
+    self.is_hovered = helpers.point_in_rect(mx, my, actual_x, abs_y, self.width - (self.indent * self.indent_size), self.height)
 
     local bg_col = self.is_hovered and constants.Colors.hover or nil
     if bg_col then
-        Rendering.rect_filled(actual_x, self.y, self.width - (self.indent * self.indent_size), self.height, bg_col, 2)
+        Rendering.rect_filled(actual_x, abs_y, self.width - (self.indent * self.indent_size), self.height, bg_col, 2)
     end
 
     -- Draw expand/collapse indicator
     local has_children = #self.children > 0
     if has_children then
         local indicator = self.is_expanded and "v" or ">"
-        Rendering.text(actual_x + 4, self.y + 4, indicator, constants.Colors.text_dim)
+        Rendering.text(actual_x + 4, abs_y + 4, indicator, constants.Colors.text_dim)
     end
 
     -- Draw text
     local text_x = actual_x + (has_children and 20 or 8)
-    Rendering.text(text_x, self.y + 4, self.text, constants.Colors.text)
+    Rendering.text(text_x, abs_y + 4, self.text, constants.Colors.text)
 
     -- Render children if expanded
     if self.is_expanded then
-        local child_y = self.y + self.height
+        local child_y = abs_y + self.height
         for _, child in ipairs(self.children) do
-            child.y = child_y
+            child.y = child_y - (self.parent_menu and self.parent_menu.y or 0)
             child:render()
             child_y = child_y + child:get_total_height()
         end
@@ -76,9 +78,11 @@ end
 function TreeNode:update()
     if not self:is_active() then return end
 
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
     local mx, my = Input.get_mouse_pos()
-    local actual_x = self.x + (self.indent * self.indent_size)
-    self.is_hovered = helpers.point_in_rect(mx, my, actual_x, self.y, self.width - (self.indent * self.indent_size), self.height)
+    local actual_x = abs_x + (self.indent * self.indent_size)
+    self.is_hovered = helpers.point_in_rect(mx, my, actual_x, abs_y, self.width - (self.indent * self.indent_size), self.height)
 
     if self.is_hovered and Input.is_left_clicked() then
         self:toggle()

@@ -36,11 +36,14 @@ end
 function Header:render()
     if not self.visible then return end
 
-    Rendering.text(self.x, self.y, self.text, self.text_color, self.font_size, false)
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
+
+    Rendering.text(abs_x, abs_y, self.text, self.text_color, self.font_size, false)
 
     if self.show_line then
-        local line_y = self.y + self.font_size + 4
-        Rendering.separator(self.x, line_y, self.width)
+        local line_y = abs_y + self.font_size + 4
+        Rendering.separator(abs_x, line_y, self.width)
     end
 end
 

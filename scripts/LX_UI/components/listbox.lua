@@ -44,19 +44,21 @@ end
 function Listbox:render()
     if not self.visible then return end
 
-    local list_y = self.y
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
+    local list_y = abs_y
     local list_height = self.height
 
     -- Draw label if provided
     if self.text and self.text ~= "" then
-        Rendering.text(self.x, self.y, self.text, constants.Colors.text)
-        list_y = self.y + 20
+        Rendering.text(abs_x, abs_y, self.text, constants.Colors.text)
+        list_y = abs_y + 20
         list_height = self.height - 20
     end
 
     -- Background
-    Rendering.rect_filled(self.x, list_y, self.width, list_height, constants.Colors.component_bg, 2)
-    Rendering.rect(self.x, list_y, self.width, list_height, constants.Colors.border, 1, 2)
+    Rendering.rect_filled(abs_x, list_y, self.width, list_height, constants.Colors.component_bg, 2)
+    Rendering.rect(abs_x, list_y, self.width, list_height, constants.Colors.border, 1, 2)
 
     -- Calculate visible items
     local visible_count = math.floor(list_height / self.item_height)
@@ -69,9 +71,9 @@ function Listbox:render()
     for i = start_index, end_index do
         local item_y = list_y + (i - start_index) * self.item_height
         local is_selected = self:is_item_selected(i)
-        local is_hovered = helpers.point_in_rect(mx, my, self.x, item_y, self.width, self.item_height)
+        local is_hovered = helpers.point_in_rect(mx, my, abs_x, item_y, self.width, self.item_height)
 
-        Rendering.dropdown_item(self.x, item_y, self.width, self.item_height, self.items[i], is_selected, is_hovered)
+        Rendering.dropdown_item(abs_x, item_y, self.width, self.item_height, self.items[i], is_selected, is_hovered)
     end
 
     -- Draw scrollbar if needed
@@ -79,23 +81,25 @@ function Listbox:render()
         local scrollbar_height = (visible_count / #self.items) * list_height
         local scrollbar_y = list_y + (self.scroll_offset / (#self.items - visible_count)) * (list_height - scrollbar_height)
 
-        Rendering.rect_filled(self.x + self.width - 8, scrollbar_y, 6, scrollbar_height, constants.Colors.accent, 3)
+        Rendering.rect_filled(abs_x + self.width - 8, scrollbar_y, 6, scrollbar_height, constants.Colors.accent, 3)
     end
 end
 
 function Listbox:update()
     if not self:is_active() then return end
 
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
     local mx, my = Input.get_mouse_pos()
 
-    local list_y = self.y
+    local list_y = abs_y
     local list_height = self.height
     if self.text and self.text ~= "" then
-        list_y = self.y + 20
+        list_y = abs_y + 20
         list_height = self.height - 20
     end
 
-    self.is_hovered = helpers.point_in_rect(mx, my, self.x, list_y, self.width, list_height)
+    self.is_hovered = helpers.point_in_rect(mx, my, abs_x, list_y, self.width, list_height)
 
     -- Handle click
     if self.is_hovered and Input.is_left_clicked() then
@@ -104,7 +108,7 @@ function Listbox:update()
 
         for i = start_index, math.min(start_index + visible_count - 1, #self.items) do
             local item_y = list_y + (i - start_index) * self.item_height
-            if helpers.point_in_rect(mx, my, self.x, item_y, self.width - 10, self.item_height) then
+            if helpers.point_in_rect(mx, my, abs_x, item_y, self.width - 10, self.item_height) then
                 self:select_item(i)
                 break
             end

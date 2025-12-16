@@ -6,6 +6,9 @@ local helpers = require("utils/helpers")
 local Input = require("core/input")
 local Rendering = require("core/rendering")
 
+local vec2 = constants.vec2
+local color = constants.color
+
 function Menu:new(title, width, height, save_key)
     local menu = setmetatable({
         -- Identity
@@ -15,6 +18,8 @@ function Menu:new(title, width, height, save_key)
         -- Dimensions
         width = width or 300,
         height = height or 400,
+        min_height = height or 400,
+        auto_height = true,
 
         -- Position (centered by default)
         x = 100,
@@ -22,9 +27,14 @@ function Menu:new(title, width, height, save_key)
 
         -- State
         is_open = true,
+        is_collapsed = false,
         is_dragging = false,
         drag_offset_x = 0,
         drag_offset_y = 0,
+
+        -- Double-click tracking
+        last_click_time = 0,
+        double_click_threshold = 300,
 
         -- Components
         components = {},
@@ -34,8 +44,14 @@ function Menu:new(title, width, height, save_key)
         next_y = constants.Settings.title_bar_height + constants.Settings.default_padding,
 
         -- Saved data cache
-        saved_data = {}
+        saved_data = {},
+
+        -- Core window (for input capture)
+        core_window = nil
     }, Menu)
+
+    -- Create core window for input handling
+    menu.core_window = core.menu.window(save_key .. "_window")
 
     -- Try to load saved position and data
     menu:load_all()
@@ -58,6 +74,30 @@ function Menu:toggle()
     self.is_open = not self.is_open
 end
 
+-- Collapse menu (show only title bar)
+function Menu:collapse()
+    self.is_collapsed = true
+end
+
+-- Expand menu (show all components)
+function Menu:expand()
+    self.is_collapsed = false
+end
+
+-- Toggle collapsed state
+function Menu:toggle_collapse()
+    self.is_collapsed = not self.is_collapsed
+    self:save_all()
+end
+
+-- Get current display height (collapsed = title bar only)
+function Menu:get_display_height()
+    if self.is_collapsed then
+        return constants.Settings.title_bar_height
+    end
+    return self.height
+end
+
 -- Get next Y position for auto-layout
 function Menu:get_next_y(spacing)
     spacing = spacing or constants.Settings.default_spacing
@@ -69,6 +109,15 @@ end
 function Menu:advance_y(height, spacing)
     spacing = spacing or constants.Settings.default_spacing
     self.next_y = self.next_y + height + spacing
+    self:update_height()
+end
+
+-- Update menu height to fit all components
+function Menu:update_height()
+    if self.auto_height then
+        local needed_height = self.next_y + constants.Settings.default_padding
+        self.height = math.max(self.min_height, needed_height)
+    end
 end
 
 -- Generate unique ID
@@ -127,11 +176,16 @@ function Menu:save_all()
     local data = {
         x = self.x,
         y = self.y,
+        is_collapsed = self.is_collapsed,
         components = self.saved_data
     }
 
     local json_str = self:encode_json(data)
     if json_str then
+        -- Create file first if it doesn't exist
+        if core.create_data_file then
+            core.create_data_file(self.save_key)
+        end
         core.write_data_file(self.save_key, json_str)
     end
 end
@@ -144,6 +198,7 @@ function Menu:load_all()
         if data then
             if data.x then self.x = data.x end
             if data.y then self.y = data.y end
+            if data.is_collapsed ~= nil then self.is_collapsed = data.is_collapsed end
             if data.components then self.saved_data = data.components end
         end
     end
@@ -268,6 +323,28 @@ function Menu:decode_json(str)
     return success and result or nil
 end
 
+-- Check if mouse is over menu
+function Menu:is_mouse_over()
+    local mx, my = Input.get_mouse_pos()
+    return helpers.point_in_rect(mx, my, self.x, self.y, self.width, self:get_display_height())
+end
+
+-- Block game input when over menu
+function Menu:block_input()
+    local mx, my = Input.get_mouse_pos()
+    local display_height = self:get_display_height()
+    local is_over = helpers.point_in_rect(mx, my, self.x, self.y, self.width, display_height)
+
+    -- Capture mouse/keyboard input when hovering or dragging the menu
+    if is_over or self.is_dragging then
+        if core.graphics.capture_next_mouse_input then
+            core.graphics.capture_next_mouse_input()
+        end
+    end
+
+    return is_over
+end
+
 -- Update menu and all components
 function Menu:update()
     if not self.is_open then return end
@@ -277,9 +354,24 @@ function Menu:update()
     local mx, my = Input.get_mouse_pos()
     local title_height = constants.Settings.title_bar_height
 
+    -- Block game input when mouse is over menu
+    local is_over = self:block_input()
+
+    -- Handle double-click on title bar to collapse/expand
+    local over_title = helpers.point_in_rect(mx, my, self.x, self.y, self.width, title_height)
+    if over_title and Input.is_left_clicked() then
+        local current_time = (core.time and core.time() * 1000) or 0
+        if current_time - self.last_click_time < self.double_click_threshold then
+            self:toggle_collapse()
+            self.last_click_time = 0
+        else
+            self.last_click_time = current_time
+        end
+    end
+
     -- Handle window dragging
     if Input.is_left_clicked() then
-        if helpers.point_in_rect(mx, my, self.x, self.y, self.width, title_height) then
+        if over_title then
             self.is_dragging = true
             self.drag_offset_x = mx - self.x
             self.drag_offset_y = my - self.y
@@ -298,11 +390,13 @@ function Menu:update()
         self.y = my - self.drag_offset_y
     end
 
-    -- Update components in order
-    for _, id in ipairs(self.component_order) do
-        local component = self.components[id]
-        if component and component:is_active() then
-            component:update()
+    -- Update components only when not collapsed
+    if not self.is_collapsed then
+        for _, id in ipairs(self.component_order) do
+            local component = self.components[id]
+            if component and component:is_active() then
+                component:update()
+            end
         end
     end
 end
@@ -311,25 +405,30 @@ end
 function Menu:render()
     if not self.is_open then return end
 
+    local display_height = self:get_display_height()
+
     -- Draw window
-    Rendering.window(self.x, self.y, self.width, self.height)
+    Rendering.window(self.x, self.y, self.width, display_height)
 
     -- Draw title
     local title_height = constants.Settings.title_bar_height
+    local collapse_indicator = self.is_collapsed and " [+]" or ""
     Rendering.text(
         self.x + self.width / 2,
         self.y + title_height / 2 - constants.Settings.default_font_size / 2,
-        self.title,
+        self.title .. collapse_indicator,
         constants.Colors.text_title,
         constants.Settings.default_font_size,
         true
     )
 
-    -- Render components in order
-    for _, id in ipairs(self.component_order) do
-        local component = self.components[id]
-        if component and component.visible then
-            component:render()
+    -- Render components only when not collapsed
+    if not self.is_collapsed then
+        for _, id in ipairs(self.component_order) do
+            local component = self.components[id]
+            if component and component.visible then
+                component:render()
+            end
         end
     end
 end

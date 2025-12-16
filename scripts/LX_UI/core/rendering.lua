@@ -8,9 +8,10 @@ local color = constants.color
 -- Draw filled rectangle
 function Rendering.rect_filled(x, y, w, h, col, radius)
     radius = radius or 0
-    core.graphics.draw_rect_filled(
+    core.graphics.rect_2d_filled(
         vec2.new(x, y),
-        vec2.new(w, h),
+        w,
+        h,
         col,
         radius
     )
@@ -20,9 +21,10 @@ end
 function Rendering.rect(x, y, w, h, col, thickness, radius)
     thickness = thickness or 1
     radius = radius or 0
-    core.graphics.draw_rect(
+    core.graphics.rect_2d(
         vec2.new(x, y),
-        vec2.new(w, h),
+        w,
+        h,
         col,
         thickness,
         radius
@@ -45,7 +47,7 @@ end
 -- Draw line
 function Rendering.line(x1, y1, x2, y2, col, thickness)
     thickness = thickness or 1
-    core.graphics.draw_line(
+    core.graphics.line_2d(
         vec2.new(x1, y1),
         vec2.new(x2, y2),
         col,

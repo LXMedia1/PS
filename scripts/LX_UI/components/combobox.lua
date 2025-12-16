@@ -43,23 +43,25 @@ end
 function Combobox:render()
     if not self.visible then return end
 
-    local combo_x = self.x
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
+    local combo_x = abs_x
     local combo_width = self.width
 
     -- Draw label if provided
     if self.text and self.text ~= "" then
-        Rendering.text(self.x, self.y + 4, self.text, constants.Colors.text)
-        combo_x = self.x + 80
+        Rendering.text(abs_x, abs_y + 4, self.text, constants.Colors.text)
+        combo_x = abs_x + 80
         combo_width = self.width - 80
     end
 
     -- Draw combobox
     local selected_text = self:get_selected_text()
-    Rendering.combobox(combo_x, self.y, combo_width, self.height, selected_text, self.is_open, self.is_hovered)
+    Rendering.combobox(combo_x, abs_y, combo_width, self.height, selected_text, self.is_open, self.is_hovered)
 
     -- Draw dropdown if open
     if self.is_open then
-        local dropdown_y = self.y + self.height
+        local dropdown_y = abs_y + self.height
         local visible_count = math.min(#self.items, self.max_visible)
         local dropdown_height = visible_count * self.item_height
 
@@ -82,23 +84,25 @@ end
 function Combobox:update()
     if not self:is_active() then return end
 
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
     local mx, my = Input.get_mouse_pos()
 
-    local combo_x = self.x
+    local combo_x = abs_x
     local combo_width = self.width
     if self.text and self.text ~= "" then
-        combo_x = self.x + 80
+        combo_x = abs_x + 80
         combo_width = self.width - 80
     end
 
-    self.is_hovered = helpers.point_in_rect(mx, my, combo_x, self.y, combo_width, self.height)
+    self.is_hovered = helpers.point_in_rect(mx, my, combo_x, abs_y, combo_width, self.height)
 
     if Input.is_left_clicked() then
         if self.is_hovered then
             self.is_open = not self.is_open
         elseif self.is_open then
             -- Check if clicked on dropdown item
-            local dropdown_y = self.y + self.height
+            local dropdown_y = abs_y + self.height
             local visible_count = math.min(#self.items, self.max_visible)
 
             for i = 1, visible_count do

@@ -50,33 +50,37 @@ end
 function Slider:render()
     if not self.visible then return end
 
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
     local label_height = constants.Settings.default_font_size
-    local track_y = self.y + label_height + 4
+    local track_y = abs_y + label_height + 4
     local track_width = self.width
 
     -- Draw label
     local text_col = self.enabled and self.text_color or constants.Colors.text_disabled
-    Rendering.text(self.x, self.y, self.text, text_col)
+    Rendering.text(abs_x, abs_y, self.text, text_col)
 
     -- Draw value
     if self.show_value then
         local value_str = self:get_display_value()
-        Rendering.text(self.x + self.width - 40, self.y, value_str, constants.Colors.text_dim)
+        Rendering.text(abs_x + self.width - 40, abs_y, value_str, constants.Colors.text_dim)
     end
 
     -- Draw slider track
     local percent = self:get_percentage()
-    Rendering.slider(self.x, track_y, track_width, self.track_height, percent, self.is_hovered, self.is_dragging)
+    Rendering.slider(abs_x, track_y, track_width, self.track_height, percent, self.is_hovered, self.is_dragging)
 end
 
 function Slider:update()
     if not self:is_active() then return end
 
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
     local mx, my = Input.get_mouse_pos()
     local label_height = constants.Settings.default_font_size
-    local track_y = self.y + label_height + 4
+    local track_y = abs_y + label_height + 4
 
-    self.is_hovered = helpers.point_in_rect(mx, my, self.x, track_y, self.width, self.track_height + 4)
+    self.is_hovered = helpers.point_in_rect(mx, my, abs_x, track_y, self.width, self.track_height + 4)
 
     -- Start dragging
     if self.is_hovered and Input.is_left_clicked() then
@@ -93,7 +97,7 @@ function Slider:update()
 
     -- Update value while dragging
     if self.is_dragging then
-        local percent = (mx - self.x) / self.width
+        local percent = (mx - abs_x) / self.width
         percent = helpers.clamp(percent, 0, 1)
         self:set_percentage(percent)
     end

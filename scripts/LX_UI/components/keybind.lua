@@ -42,13 +42,15 @@ end
 function Keybind:render()
     if not self.visible then return end
 
-    local btn_x = self.x
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
+    local btn_x = abs_x
     local btn_width = 80
 
     -- Draw label
     if self.text and self.text ~= "" then
-        Rendering.text(self.x, self.y + 4, self.text, constants.Colors.text)
-        btn_x = self.x + self.width - btn_width
+        Rendering.text(abs_x, abs_y + 4, self.text, constants.Colors.text)
+        btn_x = abs_x + self.width - btn_width
     end
 
     -- Draw keybind button
@@ -60,23 +62,25 @@ function Keybind:render()
         bg_col = constants.Colors.hover
     end
 
-    Rendering.rect_filled(btn_x, self.y, btn_width, self.height, bg_col, 2)
-    Rendering.rect(btn_x, self.y, btn_width, self.height, constants.Colors.border, 1, 2)
-    Rendering.text(btn_x + btn_width / 2, self.y + 4, display_text, constants.Colors.text, nil, true)
+    Rendering.rect_filled(btn_x, abs_y, btn_width, self.height, bg_col, 2)
+    Rendering.rect(btn_x, abs_y, btn_width, self.height, constants.Colors.border, 1, 2)
+    Rendering.text(btn_x + btn_width / 2, abs_y + 4, display_text, constants.Colors.text, nil, true)
 end
 
 function Keybind:update()
     if not self:is_active() then return end
 
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
     local mx, my = Input.get_mouse_pos()
 
-    local btn_x = self.x
+    local btn_x = abs_x
     local btn_width = 80
     if self.text and self.text ~= "" then
-        btn_x = self.x + self.width - btn_width
+        btn_x = abs_x + self.width - btn_width
     end
 
-    self.is_hovered = helpers.point_in_rect(mx, my, btn_x, self.y, btn_width, self.height)
+    self.is_hovered = helpers.point_in_rect(mx, my, btn_x, abs_y, btn_width, self.height)
 
     if Input.is_left_clicked() then
         if self.is_hovered then
