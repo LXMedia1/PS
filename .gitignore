@@ -1,0 +1,6 @@
+# Executables
+*.exe
+
+# User-specific data
+wow_settings.dat
+user
