@@ -116,10 +116,17 @@ function ColorPicker:update()
     local mx, my = Input.get_mouse_pos()
     local preview_x = abs_x + self.width - self.preview_size
 
+    -- Don't respond to new input if menu doesn't have focus
+    -- But continue handling if picker is already open
+    if not self:menu_has_focus() and not self.is_open then
+        self.is_hovered = false
+        return
+    end
+
     self.is_hovered = helpers.point_in_rect(mx, my, preview_x, abs_y, self.preview_size, self.preview_size)
 
     if Input.is_left_clicked() then
-        if self.is_hovered then
+        if self.is_hovered and self:menu_has_focus() then
             self.is_open = not self.is_open
         elseif self.is_open then
             -- Check if clicking on sliders

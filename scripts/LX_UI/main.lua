@@ -130,7 +130,7 @@ function Menu:add_button(text, x, y, width, height, callback, options)
     options.text = text
     options.x = (x or 0) + constants.Settings.default_padding
     options.y = (y or self:get_next_y())
-    options.width = width or 100
+    options.width = width or (self.width - constants.Settings.default_padding * 2)
     options.height = height or 25
     options.on_click = callback
 

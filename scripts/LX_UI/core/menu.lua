@@ -9,6 +9,68 @@ local Rendering = require("core/rendering")
 local vec2 = constants.vec2
 local color = constants.color
 
+-- Global menu manager for focus/z-order tracking
+-- This is shared across all menus
+if not _G.LX_UI_MenuManager then
+    _G.LX_UI_MenuManager = {
+        menus = {},           -- All registered menus
+        z_order = {},         -- Menu IDs in z-order (last = topmost)
+        focused_menu = nil,   -- Currently focused menu ID
+    }
+end
+local MenuManager = _G.LX_UI_MenuManager
+
+-- Register a menu with the manager
+local function register_menu(menu)
+    MenuManager.menus[menu.save_key] = menu
+    -- Add to z_order if not present
+    local found = false
+    for _, key in ipairs(MenuManager.z_order) do
+        if key == menu.save_key then
+            found = true
+            break
+        end
+    end
+    if not found then
+        table.insert(MenuManager.z_order, menu.save_key)
+    end
+end
+
+-- Bring a menu to the front (topmost)
+local function bring_to_front(menu)
+    -- Remove from current position
+    for i, key in ipairs(MenuManager.z_order) do
+        if key == menu.save_key then
+            table.remove(MenuManager.z_order, i)
+            break
+        end
+    end
+    -- Add to end (topmost)
+    table.insert(MenuManager.z_order, menu.save_key)
+    MenuManager.focused_menu = menu.save_key
+end
+
+-- Check if a menu is the topmost menu under the mouse
+local function is_topmost_at_mouse(menu)
+    local mx, my = Input.get_mouse_pos()
+
+    -- Check menus from topmost (end) to bottommost (start)
+    for i = #MenuManager.z_order, 1, -1 do
+        local key = MenuManager.z_order[i]
+        local m = MenuManager.menus[key]
+        if m and m.is_open then
+            local display_height = m:get_display_height()
+            if helpers.point_in_rect(mx, my, m.x, m.y, m.width, display_height) then
+                -- This is the topmost menu under the mouse
+                return m.save_key == menu.save_key
+            end
+        end
+    end
+
+    -- No menu under mouse
+    return false
+end
+
 function Menu:new(title, width, height, save_key)
     local menu = setmetatable({
         -- Identity
@@ -55,6 +117,9 @@ function Menu:new(title, width, height, save_key)
 
     -- Try to load saved position and data
     menu:load_all()
+
+    -- Register with global menu manager
+    register_menu(menu)
 
     return menu
 end
@@ -329,20 +394,23 @@ function Menu:is_mouse_over()
     return helpers.point_in_rect(mx, my, self.x, self.y, self.width, self:get_display_height())
 end
 
--- Block game input when over menu
+-- Block game input when over menu (only if this is the topmost menu)
 function Menu:block_input()
     local mx, my = Input.get_mouse_pos()
     local display_height = self:get_display_height()
     local is_over = helpers.point_in_rect(mx, my, self.x, self.y, self.width, display_height)
 
-    -- Capture mouse/keyboard input when hovering or dragging the menu
-    if is_over or self.is_dragging then
+    -- Only capture input if this menu is topmost at the mouse position
+    -- or if we're actively dragging this menu
+    local should_capture = self.is_dragging or (is_over and is_topmost_at_mouse(self))
+
+    if should_capture then
         if core.graphics.capture_next_mouse_input then
             core.graphics.capture_next_mouse_input()
         end
     end
 
-    return is_over
+    return is_over, should_capture
 end
 
 -- Update menu and all components
@@ -354,12 +422,18 @@ function Menu:update()
     local mx, my = Input.get_mouse_pos()
     local title_height = constants.Settings.title_bar_height
 
-    -- Block game input when mouse is over menu
-    local is_over = self:block_input()
+    -- Block game input when mouse is over menu (only if topmost)
+    local is_over, has_focus = self:block_input()
 
-    -- Handle double-click on title bar to collapse/expand
+    -- Check if this menu is the topmost one under the mouse
+    local is_topmost = is_topmost_at_mouse(self)
+
+    -- Handle double-click on title bar to collapse/expand (only if focused)
     local over_title = helpers.point_in_rect(mx, my, self.x, self.y, self.width, title_height)
-    if over_title and Input.is_left_clicked() then
+    if over_title and is_topmost and Input.is_left_clicked() then
+        -- Bring to front when clicked
+        bring_to_front(self)
+
         local current_time = (core.time and core.time() * 1000) or 0
         if current_time - self.last_click_time < self.double_click_threshold then
             self:toggle_collapse()
@@ -369,12 +443,18 @@ function Menu:update()
         end
     end
 
-    -- Handle window dragging
+    -- Bring menu to front if clicked anywhere on it
+    if is_over and is_topmost and Input.is_left_clicked() then
+        bring_to_front(self)
+    end
+
+    -- Handle window dragging (only if this menu is topmost/focused)
     if Input.is_left_clicked() then
-        if over_title then
+        if over_title and is_topmost then
             self.is_dragging = true
             self.drag_offset_x = mx - self.x
             self.drag_offset_y = my - self.y
+            bring_to_front(self)
         end
     end
 
@@ -390,12 +470,21 @@ function Menu:update()
         self.y = my - self.drag_offset_y
     end
 
-    -- Update components only when not collapsed
+    -- Update components only when not collapsed AND this menu has focus
     if not self.is_collapsed then
+        -- Only update components if we're the topmost menu or mouse isn't over any menu
+        local should_update_components = has_focus or self.is_dragging or not is_over
+
+        -- Actually, we should update components if this is our menu being interacted with
+        -- Components should only respond to input when this menu is topmost
         for _, id in ipairs(self.component_order) do
             local component = self.components[id]
-            if component and component:is_active() then
-                component:update()
+            if component then
+                -- Set a flag on the component to know if it should respond to input
+                component._menu_has_focus = is_topmost or (not is_over)
+                if component:is_active() then
+                    component:update()
+                end
             end
         end
     end
@@ -424,10 +513,19 @@ function Menu:render()
 
     -- Render components only when not collapsed
     if not self.is_collapsed then
+        -- Pass 1: Render all normal components
         for _, id in ipairs(self.component_order) do
             local component = self.components[id]
             if component and component.visible then
                 component:render()
+            end
+        end
+
+        -- Pass 2: Render overlays (dropdowns, tooltips) on top
+        for _, id in ipairs(self.component_order) do
+            local component = self.components[id]
+            if component and component.visible and component.render_overlay then
+                component:render_overlay()
             end
         end
     end

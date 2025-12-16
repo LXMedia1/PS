@@ -70,21 +70,39 @@ function Rendering.window(x, y, w, h, title_height)
 end
 
 -- Draw button
-function Rendering.button(x, y, w, h, text_str, is_hovered, is_pressed)
-    local bg_col = constants.Colors.component_bg
-    if is_pressed then
-        bg_col = constants.Colors.pressed
-    elseif is_hovered then
-        bg_col = constants.Colors.hover
+function Rendering.button(x, y, w, h, text_str, is_hovered, is_pressed, style)
+    style = style or "default"
+    local bg_col, text_col, border_col
+
+    if style == "primary" then
+        -- Accent colored button
+        bg_col = constants.Colors.accent
+        text_col = constants.Colors.text_title
+        border_col = constants.Colors.accent
+        if is_pressed then
+            bg_col = constants.Colors.accent_pressed
+        elseif is_hovered then
+            bg_col = constants.Colors.accent_hover
+        end
+    else
+        -- Default gray button
+        bg_col = constants.Colors.component_bg
+        text_col = constants.Colors.text
+        border_col = constants.Colors.border
+        if is_pressed then
+            bg_col = constants.Colors.pressed
+        elseif is_hovered then
+            bg_col = constants.Colors.hover
+        end
     end
 
     Rendering.rect_filled(x, y, w, h, bg_col, 3)
-    Rendering.rect(x, y, w, h, constants.Colors.border, 1, 3)
+    Rendering.rect(x, y, w, h, border_col, 1, 3)
 
     -- Center text
     local text_x = x + w / 2
     local text_y = y + h / 2 - constants.Settings.default_font_size / 2
-    Rendering.text(text_x, text_y, text_str, constants.Colors.text, nil, true)
+    Rendering.text(text_x, text_y, text_str, text_col, nil, true)
 end
 
 -- Draw checkbox

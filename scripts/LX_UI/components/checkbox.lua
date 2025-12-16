@@ -58,6 +58,12 @@ end
 function Checkbox:update()
     if not self:is_active() then return end
 
+    -- Don't respond to input if menu doesn't have focus
+    if not self:menu_has_focus() then
+        self.is_hovered = false
+        return
+    end
+
     local mx, my = Input.get_mouse_pos()
     self.is_hovered = self:contains_point(mx, my)
 

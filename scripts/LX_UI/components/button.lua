@@ -31,7 +31,8 @@ function Button:new(options)
         is_pressed = false,
         parent_menu = base.parent_menu,
         auto_save = false,
-        on_click = base.on_click
+        on_click = base.on_click,
+        style = options.style or "default"  -- "default" or "primary"
     }, Button)
 
     return button
@@ -42,11 +43,18 @@ function Button:render()
 
     local abs_x = self:get_abs_x()
     local abs_y = self:get_abs_y()
-    Rendering.button(abs_x, abs_y, self.width, self.height, self.text, self.is_hovered, self.is_pressed)
+    Rendering.button(abs_x, abs_y, self.width, self.height, self.text, self.is_hovered, self.is_pressed, self.style)
 end
 
 function Button:update()
     if not self:is_active() then return end
+
+    -- Don't respond to input if menu doesn't have focus
+    if not self:menu_has_focus() then
+        self.is_hovered = false
+        self.is_pressed = false
+        return
+    end
 
     local mx, my = Input.get_mouse_pos()
     self.is_hovered = self:contains_point(mx, my)

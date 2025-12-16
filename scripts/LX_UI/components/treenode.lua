@@ -82,6 +82,13 @@ function TreeNode:update()
     local abs_y = self:get_abs_y()
     local mx, my = Input.get_mouse_pos()
     local actual_x = abs_x + (self.indent * self.indent_size)
+
+    -- Don't respond to new input if menu doesn't have focus
+    if not self:menu_has_focus() then
+        self.is_hovered = false
+        return
+    end
+
     self.is_hovered = helpers.point_in_rect(mx, my, actual_x, abs_y, self.width - (self.indent * self.indent_size), self.height)
 
     if self.is_hovered and Input.is_left_clicked() then

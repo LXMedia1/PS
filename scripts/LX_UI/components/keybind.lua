@@ -80,10 +80,17 @@ function Keybind:update()
         btn_x = abs_x + self.width - btn_width
     end
 
+    -- Don't respond to new input if menu doesn't have focus
+    -- But continue capturing if already started
+    if not self:menu_has_focus() and not self.is_capturing then
+        self.is_hovered = false
+        return
+    end
+
     self.is_hovered = helpers.point_in_rect(mx, my, btn_x, abs_y, btn_width, self.height)
 
     if Input.is_left_clicked() then
-        if self.is_hovered then
+        if self.is_hovered and self:menu_has_focus() then
             self.is_capturing = true
         elseif self.is_capturing then
             self.is_capturing = false
@@ -92,6 +99,9 @@ function Keybind:update()
 
     -- Capture key
     if self.is_capturing then
+        -- Capture keyboard to prevent game input
+        Input.capture_keyboard()
+
         -- Escape to cancel
         if Input.is_key_pressed(constants.VK.ESCAPE) then
             self.is_capturing = false

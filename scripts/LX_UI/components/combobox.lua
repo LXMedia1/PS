@@ -55,30 +55,45 @@ function Combobox:render()
         combo_width = self.width - 80
     end
 
+    -- Store for overlay rendering
+    self._combo_x = combo_x
+    self._combo_width = combo_width
+
     -- Draw combobox
     local selected_text = self:get_selected_text()
     Rendering.combobox(combo_x, abs_y, combo_width, self.height, selected_text, self.is_open, self.is_hovered)
+end
 
-    -- Draw dropdown if open
-    if self.is_open then
-        local dropdown_y = abs_y + self.height
-        local visible_count = math.min(#self.items, self.max_visible)
-        local dropdown_height = visible_count * self.item_height
+-- Render dropdown in overlay pass (on top of all other components)
+function Combobox:render_overlay()
+    if not self.visible or not self.is_open then return end
 
-        -- Dropdown background
-        Rendering.rect_filled(combo_x, dropdown_y, combo_width, dropdown_height, constants.Colors.component_bg)
-        Rendering.rect(combo_x, dropdown_y, combo_width, dropdown_height, constants.Colors.border, 1)
+    local abs_x = self:get_abs_x()
+    local abs_y = self:get_abs_y()
+    local combo_x = self._combo_x or abs_x
+    local combo_width = self._combo_width or self.width
 
-        -- Draw items
-        for i = 1, visible_count do
-            local item_y = dropdown_y + (i - 1) * self.item_height
-            local mx, my = Input.get_mouse_pos()
-            local item_hovered = helpers.point_in_rect(mx, my, combo_x, item_y, combo_width, self.item_height)
-            local item_selected = i == self.selected_index
+    local dropdown_y = abs_y + self.height
+    local visible_count = math.min(#self.items, self.max_visible)
+    local dropdown_height = visible_count * self.item_height
 
-            Rendering.dropdown_item(combo_x, item_y, combo_width, self.item_height, self.items[i], item_selected, item_hovered)
-        end
+    -- Dropdown background
+    Rendering.rect_filled(combo_x, dropdown_y, combo_width, dropdown_height, constants.Colors.component_bg)
+    Rendering.rect(combo_x, dropdown_y, combo_width, dropdown_height, constants.Colors.border, 1)
+
+    -- Draw items
+    for i = 1, visible_count do
+        local item_y = dropdown_y + (i - 1) * self.item_height
+        local mx, my = Input.get_mouse_pos()
+        local item_hovered = helpers.point_in_rect(mx, my, combo_x, item_y, combo_width, self.item_height)
+        local item_selected = i == self.selected_index
+
+        Rendering.dropdown_item(combo_x, item_y, combo_width, self.item_height, self.items[i], item_selected, item_hovered)
     end
+end
+
+function Combobox:has_overlay()
+    return self.is_open
 end
 
 function Combobox:update()
@@ -95,10 +110,17 @@ function Combobox:update()
         combo_width = self.width - 80
     end
 
+    -- Don't respond to new input if menu doesn't have focus
+    -- But continue handling open dropdown even if focus changed
+    if not self:menu_has_focus() and not self.is_open then
+        self.is_hovered = false
+        return
+    end
+
     self.is_hovered = helpers.point_in_rect(mx, my, combo_x, abs_y, combo_width, self.height)
 
     if Input.is_left_clicked() then
-        if self.is_hovered then
+        if self.is_hovered and self:menu_has_focus() then
             self.is_open = not self.is_open
         elseif self.is_open then
             -- Check if clicked on dropdown item

@@ -55,6 +55,12 @@ function BaseComponent:is_active()
     return self.visible and self.enabled
 end
 
+-- Check if the parent menu has focus (for input handling)
+function BaseComponent:menu_has_focus()
+    -- _menu_has_focus is set by the parent menu during update
+    return self._menu_has_focus ~= false
+end
+
 -- Set position
 function BaseComponent:set_position(x, y)
     self.x = x
@@ -116,6 +122,12 @@ function BaseComponent:update_hover()
         return false
     end
 
+    -- Don't register hover if parent menu doesn't have focus
+    if not self:menu_has_focus() then
+        self.is_hovered = false
+        return false
+    end
+
     local mx, my = Input.get_mouse_pos()
     local was_hovered = self.is_hovered
     self.is_hovered = self:contains_point(mx, my)
@@ -141,6 +153,16 @@ end
 
 function BaseComponent:render()
     -- Override in subclass
+end
+
+-- Render overlay elements (dropdowns, tooltips, etc.) - called after all components render
+function BaseComponent:render_overlay()
+    -- Override in subclass for components with overlays
+end
+
+-- Check if component has an active overlay that should capture input
+function BaseComponent:has_overlay()
+    return false
 end
 
 function BaseComponent:get_value()

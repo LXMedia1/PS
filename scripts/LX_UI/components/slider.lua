@@ -80,10 +80,17 @@ function Slider:update()
     local label_height = constants.Settings.default_font_size
     local track_y = abs_y + label_height + 4
 
+    -- Don't respond to new input if menu doesn't have focus
+    -- But continue dragging if we already started (even if menu lost focus)
+    if not self:menu_has_focus() and not self.is_dragging then
+        self.is_hovered = false
+        return
+    end
+
     self.is_hovered = helpers.point_in_rect(mx, my, abs_x, track_y, self.width, self.track_height + 4)
 
-    -- Start dragging
-    if self.is_hovered and Input.is_left_clicked() then
+    -- Start dragging (only if menu has focus)
+    if self.is_hovered and Input.is_left_clicked() and self:menu_has_focus() then
         self.is_dragging = true
     end
 
