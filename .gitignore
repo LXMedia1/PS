@@ -4,9 +4,14 @@
 # User-specific data
 wow_settings.dat
 user
+assets
+license
 
 # API folder (not for distribution)
 scripts/.api/
+
+# Scripts data (local only)
+scripts_data/
 
 # Encrypted scripts (local only)
 scripts/common
