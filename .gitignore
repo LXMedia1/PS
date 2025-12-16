@@ -7,9 +7,6 @@ user
 assets
 license
 
-# API folder (not for distribution)
-scripts/.api/
-
 # Scripts data (local only)
 scripts_data/
 
