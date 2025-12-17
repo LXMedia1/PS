@@ -39,19 +39,20 @@ local function test(name, condition, message)
     if condition then
         test_results.passed = test_results.passed + 1
         test_results.total_passed = test_results.total_passed + 1
-        core.log("[PASS] " .. name)
+        -- Only log to file, not console (reduces noise)
         log_to_file("[PASS] " .. name)
     else
         test_results.failed = test_results.failed + 1
         test_results.total_failed = test_results.total_failed + 1
         local msg = "[FAIL] " .. name .. " - " .. (message or "")
+        -- Log failures to console so they're visible
         core.log_error(msg)
         log_to_file(msg)
     end
 end
 
 local function run_tests(name, test_fn)
-    core.log("--- " .. name .. " ---")
+    -- Only log to file, not console
     log_to_file("\n--- " .. name .. " ---")
     test_results.passed = 0
     test_results.failed = 0
@@ -75,8 +76,6 @@ local function run_all_tests()
     if not LX_UI then return end
 
     tests_ran = true
-
-    core.log("[LX_Test] Running LX_UI tests...")
 
     run_tests("Core", function()
         test("Library loaded", LX_UI ~= nil)
@@ -189,7 +188,5 @@ end
 
 -- Run on first update tick (all plugins loaded by then)
 core.register_on_update_callback(run_all_tests)
-
-core.log("[LX_Test] Waiting for LX_UI...")
 
 return LX_Test

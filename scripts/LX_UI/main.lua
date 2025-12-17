@@ -254,9 +254,4 @@ LX_UI.VERSION = "1.0.0"
 -- Export to global namespace (so other plugins can access via _G.LX_UI)
 _G.LX_UI = LX_UI
 
--- Log load
-if core and core.log then
-    core.log("[LX_UI] Library loaded v" .. LX_UI.VERSION)
-end
-
 return LX_UI

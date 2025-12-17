@@ -148,11 +148,8 @@ local function load_path(name)
     if smooth_enabled and original_count >= 3 then
         local is_loop = (path_data.path_type == "loop") or loop_enabled
         path_data.points = smooth_path(path_data.original_points, smooth_subdivisions, is_loop)
-        core.log(string.format("[LX_Mover] Loaded path '%s': %d points -> %d smoothed",
-            name, original_count, #path_data.points))
     else
         path_data.points = path_data.original_points
-        core.log("[LX_Mover] Loaded path: " .. name .. " with " .. original_count .. " points")
     end
 
     return path_data
@@ -169,8 +166,6 @@ local function refresh_path_list()
             end
         end
     end
-
-    core.log("[LX_Mover] Found " .. #saved_paths .. " saved paths")
 
     if ui.path_combo then
         ui.path_combo:set_items(saved_paths)
@@ -332,7 +327,6 @@ local function find_closest_waypoint()
         end
     end
 
-    core.log(string.format("[LX_Mover] Closest waypoint is #%d at distance %.1f", closest_index, closest_dist))
     return closest_index
 end
 
@@ -349,15 +343,12 @@ local function start_path()
 
     -- Start moving forward immediately
     start_forward()
-
-    core.log(string.format("[LX_Mover] Started path '%s' from point #%d", current_path.name, current_index))
 end
 
 local function pause_path()
     if state == STATE.MOVING then
         stop_all_movement()
         state = STATE.PAUSED
-        core.log("[LX_Mover] Paused")
     end
 end
 
@@ -365,7 +356,6 @@ local function resume_path()
     if state == STATE.PAUSED then
         state = STATE.MOVING
         start_forward()
-        core.log("[LX_Mover] Resumed")
     end
 end
 
@@ -374,7 +364,6 @@ local function stop_path()
     state = STATE.IDLE
     current_index = 1
     path_direction = 1
-    core.log("[LX_Mover] Stopped")
 end
 
 -----------------------------------------------------------
@@ -405,7 +394,6 @@ local function update_movement()
 
     -- Check if we've arrived at waypoint (NO STOPPING - just advance)
     if distance < waypoint_threshold then
-        core.log(string.format("[LX_Mover] Reached point %d, dist=%.1f", current_index, distance))
         advance_to_next_waypoint()
         -- Get next target immediately for smooth transition
         target = get_current_waypoint()
@@ -447,13 +435,6 @@ local function update_movement()
 
     -- Smooth look_at the interpolated point
     core.input.look_at(look_point)
-
-    -- Log occasionally for debugging
-    local cross, dot = get_turn_direction(player, target)
-    if math.abs(cross) > 0.1 then
-        core.log(string.format("[LX_Mover] Turning to point %d, cross=%.2f, dot=%.2f",
-            current_index, cross, dot))
-    end
 end
 
 -----------------------------------------------------------
@@ -795,8 +776,6 @@ local function init()
     if #saved_paths > 0 then
         current_path = load_path(saved_paths[1])
     end
-
-    core.log("[LX_Mover] Initialized")
 end
 
 -----------------------------------------------------------
@@ -882,7 +861,5 @@ end
 
 core.register_on_update_callback(on_update)
 core.register_on_render_callback(on_render)
-
-core.log("[LX_Mover] Plugin loaded")
 
 return LX_Mover

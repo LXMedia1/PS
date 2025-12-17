@@ -50,8 +50,25 @@ local function bring_to_front(menu)
     MenuManager.focused_menu = menu.save_key
 end
 
+-- Count how many menus are open
+local function count_open_menus()
+    local count = 0
+    for _, key in ipairs(MenuManager.z_order) do
+        local m = MenuManager.menus[key]
+        if m and m.is_open then
+            count = count + 1
+        end
+    end
+    return count
+end
+
 -- Check if a menu is the topmost menu under the mouse
 local function is_topmost_at_mouse(menu)
+    -- If only one menu is open, it's always topmost
+    if count_open_menus() <= 1 then
+        return true
+    end
+
     local mx, my = Input.get_mouse_pos()
 
     -- Check menus from topmost (end) to bottommost (start)
@@ -67,8 +84,8 @@ local function is_topmost_at_mouse(menu)
         end
     end
 
-    -- No menu under mouse
-    return false
+    -- No menu under mouse - treat as topmost
+    return true
 end
 
 function Menu:new(title, width, height, save_key)
@@ -470,18 +487,15 @@ function Menu:update()
         self.y = my - self.drag_offset_y
     end
 
-    -- Update components only when not collapsed AND this menu has focus
+    -- Update components only when not collapsed
     if not self.is_collapsed then
-        -- Only update components if we're the topmost menu or mouse isn't over any menu
-        local should_update_components = has_focus or self.is_dragging or not is_over
-
-        -- Actually, we should update components if this is our menu being interacted with
-        -- Components should only respond to input when this menu is topmost
         for _, id in ipairs(self.component_order) do
             local component = self.components[id]
             if component then
-                -- Set a flag on the component to know if it should respond to input
-                component._menu_has_focus = is_topmost or (not is_over)
+                -- Component has focus if:
+                -- 1. This menu is the topmost menu, OR
+                -- 2. Mouse is not over this menu (so it's not blocking another menu)
+                component._menu_has_focus = is_topmost
                 if component:is_active() then
                     component:update()
                 end

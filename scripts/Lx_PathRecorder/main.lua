@@ -136,8 +136,6 @@ local function refresh_path_list()
         end
     end
 
-    core.log("[PathRecorder] Loaded " .. #saved_paths .. " saved paths from manifest")
-
     -- Update UI if exists
     if ui.saved_path_list then
         ui.saved_path_list:set_items(saved_paths)
@@ -560,8 +558,6 @@ local function init()
         height = 18
     })
     menu:add_component(ui.status_label)
-
-    core.log("[Lx_PathRecorder] Initialized")
 end
 
 -- Custom panel background rendering
@@ -739,7 +735,5 @@ end
 
 core.register_on_update_callback(on_update)
 core.register_on_render_callback(on_render)
-
-core.log("[Lx_PathRecorder] Plugin loaded")
 
 return Lx_PathRecorder

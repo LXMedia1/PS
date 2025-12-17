@@ -23,8 +23,18 @@ local keyboard = {
     alt = false
 }
 
+-- Frame tracking to prevent multiple updates per frame
+local last_update_time = 0
+
 -- Update input state (call once per frame)
 function Input.update()
+    -- Prevent multiple updates in the same frame
+    local current_time = core.time and core.time() or 0
+    if current_time == last_update_time and last_update_time > 0 then
+        return  -- Already updated this frame
+    end
+    last_update_time = current_time
+
     -- Get cursor position
     local cursor = core.get_cursor_position()
     if cursor then
