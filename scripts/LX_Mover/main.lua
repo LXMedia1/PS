@@ -34,6 +34,10 @@ local waypoint_threshold = 2.5  -- Distance to consider "arrived" (don't stop, j
 local turn_threshold = 0.15     -- Radians - stop turning when angle diff is small
 local loop_enabled = true
 
+-- Tab-out detection
+local INPUT_BIT_FORWARD = 0x10    -- Input bit for move_forward
+local is_tabbed_out = false       -- True when game window loses focus
+
 -- Path file constants (same as PathRecorder)
 local PATH_FOLDER = "pathrecorder/"
 local MANIFEST_FILE = "pathrecorder/_manifest"
@@ -370,8 +374,11 @@ end
 -- Main Update Loop
 -----------------------------------------------------------
 
--- Smooth turning settings
-local turn_speed = 0.15  -- How fast to turn (0-1, higher = faster)
+-- Base movement parameters (tuned for ~7 units/sec walking speed)
+local base_speed = 7
+local base_turn_speed = 0.15
+local base_look_distance = 10
+local base_threshold = 2.5
 
 local function update_movement()
     if state ~= STATE.MOVING then return end
@@ -389,11 +396,20 @@ local function update_movement()
         return
     end
 
+    -- Get current movement speed and calculate dynamic parameters
+    local move_speed = player:get_movement_speed() or base_speed
+    local speed_ratio = move_speed / base_speed
+
+    -- Scale parameters with speed (faster = faster turning, further look-ahead)
+    local turn_speed = math.min(base_turn_speed * speed_ratio, 0.5)  -- Cap at 0.5
+    local look_distance = math.max(base_look_distance * speed_ratio, 10)  -- Min 10
+    local threshold = math.max(math.min(base_threshold * speed_ratio, 8), 2)  -- Clamp 2-8
+
     -- Calculate distance to current waypoint
     local distance = pos:dist_to(target)
 
     -- Check if we've arrived at waypoint (NO STOPPING - just advance)
-    if distance < waypoint_threshold then
+    if distance < threshold then
         advance_to_next_waypoint()
         -- Get next target immediately for smooth transition
         target = get_current_waypoint()
@@ -426,7 +442,6 @@ local function update_movement()
     local new_dir_z = dir.z + (to_target_z - dir.z) * turn_speed
 
     -- Create a point to look at (current position + interpolated direction * some distance)
-    local look_distance = 10  -- Look 10 units ahead
     local look_point = vec3.new(
         pos.x + new_dir_x * look_distance,
         pos.y + new_dir_y * look_distance,
@@ -435,6 +450,39 @@ local function update_movement()
 
     -- Smooth look_at the interpolated point
     core.input.look_at(look_point)
+end
+
+-----------------------------------------------------------
+-- Tab-Out Detection & Auto-Resume
+-----------------------------------------------------------
+
+local last_reactivate_attempt = 0
+
+local function update_tabbed_out()
+    -- Only check when we're in moving state
+    if state ~= STATE.MOVING then
+        is_tabbed_out = false
+        return
+    end
+
+    -- Check if API function exists
+    if not core.input.is_input_bit_active then
+        return
+    end
+
+    -- Check if input bit is active (game-level forward movement)
+    local bit_active = core.input.is_input_bit_active(INPUT_BIT_FORWARD)
+    is_tabbed_out = not bit_active
+
+    -- When tabbed out, periodically try to re-activate movement
+    if is_tabbed_out then
+        local now = core.time and core.time() or 0
+        if now - last_reactivate_attempt > 0.2 then
+            last_reactivate_attempt = now
+            core.input.move_forward_start()
+            is_moving_forward = true
+        end
+    end
 end
 
 -----------------------------------------------------------
@@ -839,6 +887,7 @@ local function on_update()
     end
 
     update_movement()
+    update_tabbed_out()
     update_ui()
 end
 
