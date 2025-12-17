@@ -25,3 +25,6 @@ scripts/ext_0_plugin_universal_racials
 scripts/ext_0_plugin_universal_reflects
 /scripts_log
 nul
+/export_map
+*.bat
+*.ps1
