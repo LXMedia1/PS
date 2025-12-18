@@ -29,3 +29,6 @@ nul
 *.bat
 *.ps1
 /screenshots
+build_error.txt
+build_output.txt
+Research1.txt
