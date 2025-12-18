@@ -182,7 +182,7 @@ function TileManager:get_all_tiles(map_id)
     local tiles = {}
     for key, tile in pairs(self.cached) do
         if tile and tile.mapId == map_id then
-            table.insert(tiles, tile)
+            tiles[key] = tile  -- Keep string keys like "1_29_40"
         end
     end
     return tiles
@@ -277,6 +277,10 @@ function TileManager:process_frame(frame_budget_ms)
                 self.cached[task.key] = false
                 self.tiles_failed = self.tiles_failed + 1
             else
+                -- Add metadata to tile
+                result.mapId = task.map_id
+                result.tileX = task.x
+                result.tileY = task.y
                 Debug.log(string.format("[TileManager] Tile loaded: %s (%d polys, %d detailTris)",
                     task.key, #result.polygons, result.meshHeader.detailTriCount or 0))
                 self.cached[task.key] = result

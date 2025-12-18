@@ -32,3 +32,4 @@ nul
 build_error.txt
 build_output.txt
 Research1.txt
+*.txt

@@ -520,7 +520,7 @@ function Wireframe.render()
         return
     end
 
-    local map_id = core.get_map_id()
+    local map_id = core.get_instance_id()
     if not map_id then
         Debug.perf_end("Wireframe.render")
         return
@@ -557,7 +557,7 @@ function Wireframe.render()
     local bvnodes_drawn = 0
 
     Debug.perf_start("draw_all_tiles")
-    for _, tile in ipairs(tiles) do
+    for _, tile in pairs(tiles) do  -- pairs instead of ipairs (tiles now have string keys)
         for polyIdx, poly in ipairs(tile.polygons) do
             polys_checked = polys_checked + 1
             -- Use detail triangles for better terrain following
@@ -588,13 +588,13 @@ function Wireframe.render()
         Debug.log(string.format("[Wireframe] tile(%d,%d) cached=%d queued=%d polys=%d detailTris=%d offmesh=%d bvnodes=%d",
             tile_x, tile_y, stats.cached, stats.queued, polys_drawn, detail_tris_drawn, offmesh_drawn, bvnodes_drawn))
         -- Log center tile bounds with Recast values for debugging
-        for _, tile in ipairs(tiles) do
-            if tile.fileTileX == tile_x and tile.fileTileY == tile_y then
+        for _, tile in pairs(tiles) do  -- pairs instead of ipairs
+            if tile.tileX == tile_x and tile.tileY == tile_y then
                 -- This is the center tile - log everything
                 if tile.meshHeader then
                     local mh = tile.meshHeader
-                    Debug.log(string.format("[Wireframe] Center tile file(%d_%d) mesh(%d_%d) Recast bmin(%.1f,%.1f,%.1f) bmax(%.1f,%.1f,%.1f)",
-                        tile.fileTileX, tile.fileTileY, tile.tileX, tile.tileY,
+                    Debug.log(string.format("[Wireframe] Center tile (%d_%d) Recast bmin(%.1f,%.1f,%.1f) bmax(%.1f,%.1f,%.1f)",
+                        tile.tileX, tile.tileY,
                         mh.bmin[1], mh.bmin[2], mh.bmin[3],
                         mh.bmax[1], mh.bmax[2], mh.bmax[3]))
                 end

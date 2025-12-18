@@ -7,6 +7,12 @@ local Binary = require("modules/binary")
 local MMapParser = require("modules/mmap_parser")
 local TileParser = require("modules/tile_parser")
 local Wireframe = require("modules/wireframe")
+local NavWorld = require("modules/nav_world")
+local NavQuery = require("modules/nav_query")
+
+-- Graphics
+local color = require("common/color")
+local vec3 = require("common/geometry/vector_3")
 
 -- Menu elements (created upfront)
 local menu_elements = {
@@ -18,6 +24,12 @@ local menu_elements = {
     wireframe_enabled = core.menu.checkbox(false, "lx_nav_wireframe"),  -- Default OFF for production
     wireframe_range = core.menu.slider_int(10, 100, 50, "lx_nav_wireframe_range"),
     wireframe_bvnodes = core.menu.checkbox(false, "lx_nav_bvnodes"),
+    -- Pathfinding controls
+    path_tree = core.menu.tree_node(),
+    path_enabled = core.menu.checkbox(false, "lx_nav_path_enabled"),
+    path_to_target = core.menu.button("lx_nav_path_to_target"),
+    path_to_click = core.menu.button("lx_nav_path_to_click"),
+    path_clear = core.menu.button("lx_nav_path_clear"),
     -- Test controls
     test_tree = core.menu.tree_node(),
     run_crosstile_test = core.menu.button("lx_nav_crosstile_btn"),
@@ -28,6 +40,16 @@ local State = {
     initialized = false,
     enabled = true,
     crosstile_test_done = false,  -- Reset to re-run test
+}
+
+-- Pathfinding state
+local PathState = {
+    world = nil,      -- NavWorld instance
+    query = nil,      -- NavQuery instance
+    path = nil,       -- Current path (array of {x,y,z})
+    polyPath = nil,   -- Current polygon path
+    stats = nil,      -- Path stats
+    targetPos = nil,  -- Target position {x,y,z}
 }
 
 -- Test binary reading helpers
@@ -988,20 +1010,27 @@ local function test_cross_tile_connections()
         return
     end
 
-    local map_id = core.get_map_id()
+    local map_id = core.get_instance_id()
     local cached_tiles = tile_manager:get_all_tiles(map_id)
-    if #cached_tiles < 4 then
-        log(string.format("ERROR: Need at least 4 tiles for adjacency test, got %d", #cached_tiles))
+
+    -- Count tiles (get_all_tiles returns table with string keys, not array)
+    local tile_count = 0
+    for _ in pairs(cached_tiles) do
+        tile_count = tile_count + 1
+    end
+
+    if tile_count < 4 then
+        log(string.format("ERROR: Need at least 4 tiles for adjacency test, got %d", tile_count))
         log("Enable wireframe and wait for tiles to load.")
-        Debug.log(string.format("[CrossTile] ERROR: Only %d tiles cached, need 4+", #cached_tiles))
+        Debug.log(string.format("[CrossTile] ERROR: Only %d tiles cached, need 4+", tile_count))
         return
     end
 
     -- Build tile lookup by file coordinates
     local tiles = {}
-    log(string.format("Using %d cached tiles from TileManager:", #cached_tiles))
-    for _, tile in ipairs(cached_tiles) do
-        local name = string.format("%d_%d", tile.fileTileX, tile.fileTileY)
+    log(string.format("Using %d cached tiles from TileManager:", tile_count))
+    for key, tile in pairs(cached_tiles) do
+        local name = string.format("%d_%d", tile.tileX, tile.tileY)
         tile.name = name
         tiles[name] = tile
         log(string.format("  %s: Detour(%d,%d), %d polys, %d verts",
@@ -1468,7 +1497,7 @@ local function scan_all_tiles_for_player()
     if not player then return end
     local pos = player:get_position()
     if not pos then return end
-    local map_id = core.get_map_id()
+    local map_id = core.get_instance_id()
     if not map_id then return end
 
     log("==============================================")
@@ -1567,6 +1596,142 @@ local function scan_all_tiles_for_player()
     Debug.log("Tile scan complete - see parse_log_tilescan.log")
 end
 
+-- =========================
+-- Pathfinding Functions
+-- =========================
+
+-- Initialize pathfinding system
+local function init_pathfinding()
+    if PathState.world then return end  -- Already initialized
+
+    PathState.world = NavWorld.new()
+    PathState.query = NavQuery.new(PathState.world)
+
+    Debug.log("[Path] Pathfinding system initialized")
+end
+
+-- Sync NavWorld with loaded tiles
+local function sync_pathfinding()
+    if not PathState.world then return end
+
+    local mgr = Wireframe.get_tile_manager()
+    if not mgr then return end
+
+    local instanceId = core.get_instance_id()
+    local added = PathState.world:sync_with_tile_manager(mgr, instanceId)
+
+    if added > 0 then
+        local stats = PathState.world:get_stats()
+        Debug.log(string.format("[Path] Synced %d tiles (total: %d tiles, %d polys, %d resolved edges)",
+            added, stats.tiles, stats.polys, stats.resolvedEdges))
+    end
+end
+
+-- Find path from player to target position
+local function find_path_to(targetX, targetY, targetZ)
+    if not PathState.world or not PathState.query then
+        Debug.log_error("[Path] Pathfinding not initialized")
+        return false
+    end
+
+    local player = core.object_manager.get_local_player()
+    if not player then
+        Debug.log_error("[Path] No player")
+        return false
+    end
+
+    local pos = player:get_position()
+    if not pos then
+        Debug.log_error("[Path] No player position")
+        return false
+    end
+
+    Debug.log(string.format("[Path] Finding path: (%.1f,%.1f,%.1f) -> (%.1f,%.1f,%.1f)",
+        pos.x, pos.y, pos.z, targetX, targetY, targetZ))
+
+    local result = PathState.query:find_path(pos.x, pos.y, pos.z, targetX, targetY, targetZ)
+
+    if result.success then
+        PathState.path = result.path
+        PathState.polyPath = result.polyPath
+        PathState.stats = result.stats
+        PathState.targetPos = {x = targetX, y = targetY, z = targetZ}
+
+        Debug.log(string.format("[Path] SUCCESS: %d polys, %d waypoints, %.2f ms A*, %.2f ms funnel",
+            result.stats.polys, result.stats.waypoints, result.stats.astarMs, result.stats.funnelMs))
+        return true
+    else
+        Debug.log_error(string.format("[Path] FAILED: %s (expansions: %d)",
+            result.error or "unknown", result.expansions or 0))
+        return false
+    end
+end
+
+-- Find path to current target (from targeting system)
+local function find_path_to_target()
+    local player = core.object_manager.get_local_player()
+    if not player then
+        Debug.log_error("[Path] No local player")
+        return false
+    end
+
+    local target = player:get_target()
+    if not target then
+        Debug.log_error("[Path] No target selected")
+        return false
+    end
+
+    local pos = target:get_position()
+    if not pos then
+        Debug.log_error("[Path] Target has no position")
+        return false
+    end
+
+    return find_path_to(pos.x, pos.y, pos.z)
+end
+
+-- Clear current path
+local function clear_path()
+    PathState.path = nil
+    PathState.polyPath = nil
+    PathState.stats = nil
+    PathState.targetPos = nil
+    Debug.log("[Path] Path cleared")
+end
+
+-- Draw path
+local function draw_path()
+    if not PathState.path or #PathState.path < 2 then return end
+
+    local path = PathState.path
+    local pathColor = color.new(0, 255, 255, 255)  -- Cyan
+    local waypointColor = color.new(255, 255, 0, 255)  -- Yellow
+
+    -- Draw lines between waypoints
+    for i = 1, #path - 1 do
+        local p1 = path[i]
+        local p2 = path[i + 1]
+
+        local v1 = vec3.new(p1.x, p1.y, (p1.z or 0) + 0.5)  -- Slightly above ground
+        local v2 = vec3.new(p2.x, p2.y, (p2.z or 0) + 0.5)
+
+        core.graphics.line_3d(v1, v2, pathColor, 2.0)
+    end
+
+    -- Draw waypoint markers
+    for i, p in ipairs(path) do
+        local v = vec3.new(p.x, p.y, (p.z or 0) + 0.5)
+        core.graphics.circle_3d_filled(v, 0.3, waypointColor)
+    end
+
+    -- Draw target marker
+    if PathState.targetPos then
+        local t = PathState.targetPos
+        local v = vec3.new(t.x, t.y, (t.z or 0) + 1.0)
+        core.graphics.circle_3d_filled(v, 0.5, color.new(255, 0, 0, 255))  -- Red
+    end
+end
+
 -- Initialize plugin
 local function initialize()
     Debug.init()
@@ -1579,7 +1744,7 @@ local function initialize()
         if pos then
             Debug.log(string.format("Player position: (%.1f, %.1f, %.1f)", pos.x, pos.y, pos.z))
         end
-        local map_id = core.get_map_id()
+        local map_id = core.get_instance_id()
         Debug.log(string.format("Map ID: %d", map_id))
     end
 
@@ -1591,6 +1756,9 @@ local function initialize()
     -- test_binary_helpers()
     -- test_mmap_parser()
     -- test_cross_tile_connections()
+
+    -- Initialize pathfinding system
+    init_pathfinding()
 
     State.initialized = true
     Debug.log("LX_Nav initialized successfully")
@@ -1607,6 +1775,25 @@ local function on_update()
     -- Check enabled state from menu
     State.enabled = menu_elements.enabled:get_state()
     if not State.enabled then return end
+
+    -- Ensure tiles are loading for pathfinding (even when wireframe is off)
+    local mgr = Wireframe.get_tile_manager()
+    if mgr then
+        -- Queue nearby tiles based on player position
+        local player = core.object_manager.get_local_player()
+        if player then
+            local pos = player:get_position()
+            if pos then
+                local instanceId = core.get_instance_id()
+                mgr:queue_nearby(instanceId, pos.x, pos.y)
+            end
+        end
+        -- Process tile loading (frame-budgeted)
+        mgr:process_frame(3.0)
+    end
+
+    -- Sync pathfinding world with loaded tiles
+    sync_pathfinding()
 
     -- Process extraction coroutine (frame-budgeted)
     if ExtractState.running then
@@ -1646,6 +1833,12 @@ local function on_render()
         end
     end
 
+    -- Draw path if enabled
+    local path_enabled = menu_elements.path_enabled:get_state()
+    if path_enabled then
+        draw_path()
+    end
+
     -- Show debug stats if enabled
     local show_debug = menu_elements.show_debug:get_state()
     if show_debug then
@@ -1655,6 +1848,16 @@ local function on_render()
 
         if wireframe_enabled then
             table.insert(extra, string.format("Wireframe: ON (range: %d)", wireframe_range))
+        end
+
+        -- Show pathfinding stats
+        if PathState.world then
+            local worldStats = PathState.world:get_stats()
+            table.insert(extra, string.format("NavWorld: %d tiles, %d polys", worldStats.tiles, worldStats.polys))
+        end
+
+        if PathState.stats then
+            table.insert(extra, string.format("Path: %d polys, %d waypoints", PathState.stats.polys, PathState.stats.waypoints))
         end
 
         -- Show extraction progress if running
@@ -1680,6 +1883,24 @@ local function on_render_menu()
             menu_elements.wireframe_enabled:render("Enable Wireframe")
             menu_elements.wireframe_range:render("Draw Range (yards)")
             menu_elements.wireframe_bvnodes:render("Show BVNodes (spatial tree)")
+        end)
+
+        -- Pathfinding submenu
+        menu_elements.path_tree:render("Pathfinding", function()
+            menu_elements.path_enabled:render("Show Path")
+
+            if menu_elements.path_to_target:render("Path to Target") then
+                find_path_to_target()
+            end
+
+            if menu_elements.path_to_click:render("Path to Click") then
+                -- TODO: Implement click-to-path
+                Debug.log("[Path] Click-to-path not yet implemented")
+            end
+
+            if menu_elements.path_clear:render("Clear Path") then
+                clear_path()
+            end
         end)
 
         -- Test submenu
