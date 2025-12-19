@@ -171,19 +171,77 @@ local function adjust_waypoint_for_safety(tile, poly, x, y, margin)
 end
 
 -- =========================
--- Floor Height Snapping
+-- Floor Height Snapping (Async)
 -- =========================
 
 local vec3 = require("common/geometry/vector_3")
 
--- Snap Z coordinate to actual floor height using game API
-local function snap_to_floor(x, y, z)
-    local pos = vec3.new(x, y, z)
+-- Async floor snapping state (module-level, shared across NavQuery instances)
+local floor_snap_state = {
+    active = false,
+    waypoints = nil,
+    current_index = 1,
+    start_z = 0,
+}
+
+-- Height offset above polygon to start raycast (ensures we scan DOWN to ground, not through it)
+local RAYCAST_HEIGHT_ABOVE = 15.0
+
+-- Snap single waypoint to floor height (used by async processor)
+local function snap_waypoint_to_floor(wp, fallback_z)
+    -- Start raycast from ABOVE the current Z to scan down to ground
+    -- This prevents scanning through the floor to lower levels
+    local scan_z = (wp.z or fallback_z) + RAYCAST_HEIGHT_ABOVE
+    local pos = vec3.new(wp.x, wp.y, scan_z)
     local floor_z = core.get_height_for_position(pos)
     if floor_z and floor_z > 0 then
-        return floor_z + FLOOR_HEIGHT_OFFSET
+        wp.z = floor_z + FLOOR_HEIGHT_OFFSET
     end
-    return z  -- Fallback to original Z if API fails
+end
+
+-- Process floor snapping incrementally (call each frame from main.lua)
+-- Returns: true if still processing, false if done/idle
+local function process_floor_snapping(max_per_frame)
+    max_per_frame = max_per_frame or 3  -- Process 3 waypoints per frame
+
+    if not floor_snap_state.active then return false end
+
+    local waypoints = floor_snap_state.waypoints
+    if not waypoints then
+        floor_snap_state.active = false
+        return false
+    end
+
+    local i = floor_snap_state.current_index
+    local processed = 0
+
+    while i <= #waypoints and processed < max_per_frame do
+        snap_waypoint_to_floor(waypoints[i], floor_snap_state.start_z)
+        i = i + 1
+        processed = processed + 1
+    end
+
+    floor_snap_state.current_index = i
+
+    if i > #waypoints then
+        floor_snap_state.active = false
+        return false  -- Done
+    end
+
+    return true  -- Still processing
+end
+
+-- Start async floor snapping for a path
+local function start_floor_snapping(waypoints, start_z)
+    floor_snap_state.active = true
+    floor_snap_state.waypoints = waypoints
+    floor_snap_state.current_index = 1
+    floor_snap_state.start_z = start_z or 0
+end
+
+-- Check if floor snapping is in progress
+local function is_floor_snapping_active()
+    return floor_snap_state.active
 end
 
 -- =========================
@@ -756,7 +814,7 @@ end
 
 -- Debug logging for path analysis
 local PATH_DEBUG_LOG = "LX_Nav_path_analysis.log"
-local PATH_DEBUG_ENABLED = true
+local PATH_DEBUG_ENABLED = false  -- DISABLED: causes 1+ second freeze when enabled
 
 local function logPathDebug(msg)
     if PATH_DEBUG_ENABLED then
@@ -1642,6 +1700,11 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
         debugLines[#debugLines + 1] = line
     end
 
+    -- Performance tracking
+    local ticks_per_ms = core.cpu_ticks_per_second() / 1000
+    local perf = {}  -- Store timing for each step
+    local totalStart = core.cpu_ticks()
+
     dbg(string.format("=== PATH REQUEST #%d ===", path_debug_counter))
     dbg(string.format("Start: (%.1f, %.1f, %.1f)", startX, startY, startZ))
     dbg(string.format("End: (%.1f, %.1f, %.1f)", endX, endY, endZ))
@@ -1656,6 +1719,7 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
     dbg(string.format("NavWorld tiles loaded: %d", world:get_tile_count()))
 
     -- Find start tile and polygon
+    local polyLookupStart = core.cpu_ticks()
     local startTileId = world:get_tile_at(startX, startY)
     if not startTileId then
         dbg(string.format("FAIL: Start tile (%d,%d) NOT LOADED", stx, sty))
@@ -1716,15 +1780,18 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
         dbg("WARNING: Start and End polygons may be on different floors!")
     end
 
+    perf.polyLookup = (core.cpu_ticks() - polyLookupStart) / ticks_per_ms
+    dbg(string.format("[PERF] Polygon lookup: %.2f ms", perf.polyLookup))
+
     -- A* search
     dbg("--- A* SEARCH ---")
     local startTime = core.cpu_ticks()
     local polyPath, err, expansions = self:find_poly_path(startTileId, startPoly, endTileId, endPoly)
     local astarTime = (core.cpu_ticks() - startTime) / (core.cpu_ticks_per_second() / 1000)
 
-    dbg(string.format("A* result: %s, expansions: %d, time: %.2f ms",
-        polyPath and "SUCCESS" or ("FAILED:" .. (err or "unknown")),
-        expansions or 0, astarTime))
+    perf.astar = astarTime
+    dbg(string.format("[PERF] A* search: %.2f ms (expansions: %d)",
+        astarTime, expansions or 0))
 
     if not polyPath then
         -- Log failure details
@@ -1760,9 +1827,11 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
     )
     local funnelTime = (core.cpu_ticks() - startTime) / (core.cpu_ticks_per_second() / 1000)
 
-    dbg(string.format("Funnel: %d waypoints, time: %.2f ms", #waypoints, funnelTime))
+    perf.funnel = funnelTime
+    dbg(string.format("[PERF] Funnel: %.2f ms (%d waypoints)", funnelTime, #waypoints))
 
     -- Sample heights for waypoints
+    local heightStart = core.cpu_ticks()
     for i, wp in ipairs(waypoints) do
         local tileId = world:get_tile_at(wp.x, wp.y)
         if tileId then
@@ -1789,12 +1858,20 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
         end
         dbg(string.format("  WP[%d]: (%.1f, %.1f, %.1f)", i, wp.x, wp.y, wp.z or 0))
     end
+    perf.heightSample = (core.cpu_ticks() - heightStart) / ticks_per_ms
+    dbg(string.format("[PERF] Height sampling: %.2f ms", perf.heightSample))
 
-    -- Snap all waypoints to actual floor height using game API
-    for i, wp in ipairs(waypoints) do
-        wp.z = snap_to_floor(wp.x, wp.y, wp.z or startZ)
-    end
+    -- Start async floor snapping (non-blocking, processes over multiple frames)
+    start_floor_snapping(waypoints, startZ)
 
+    -- Total time and summary
+    perf.total = (core.cpu_ticks() - totalStart) / ticks_per_ms
+    dbg("=== PERFORMANCE SUMMARY ===")
+    dbg(string.format("[PERF] Polygon lookup: %.2f ms", perf.polyLookup))
+    dbg(string.format("[PERF] A* search:      %.2f ms", perf.astar))
+    dbg(string.format("[PERF] Funnel:         %.2f ms", perf.funnel))
+    dbg(string.format("[PERF] Height sample:  %.2f ms", perf.heightSample))
+    dbg(string.format("[PERF] TOTAL:          %.2f ms", perf.total))
     dbg("=== SUCCESS ===")
     write_path_debug(debugLines)
 
@@ -1811,5 +1888,9 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
         }
     }
 end
+
+-- Export floor snapping functions for main.lua to call
+NavQuery.process_floor_snapping = process_floor_snapping
+NavQuery.is_floor_snapping_active = is_floor_snapping_active
 
 return NavQuery

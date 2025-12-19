@@ -1800,6 +1800,9 @@ local function on_update()
     -- Sync pathfinding world with loaded tiles
     sync_pathfinding()
 
+    -- Process floor height snapping incrementally (non-blocking)
+    NavQuery.process_floor_snapping(3)  -- 3 waypoints per frame
+
     -- Process extraction coroutine (frame-budgeted)
     if ExtractState.running then
         process_extraction()
