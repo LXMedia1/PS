@@ -635,7 +635,8 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
     local apexI, leftI, rightI = 1, 1, 1
 
     -- Start waypoint (owner = 1, first polygon)
-    out[#out + 1] = {x = apexX, y = apexY}
+    -- Use actual start position, not clamped position (funnel uses clamped internally)
+    out[#out + 1] = {x = startPos.x, y = startPos.y}
     owners[#out] = portalPolyIndex[1]
 
     local eps2 = 1e-12
@@ -699,7 +700,8 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
 
     -- EDGE AVOIDANCE: Push waypoints away from dangerous edges (walls/cliffs)
     -- Applied before height sampling so heights are sampled at adjusted positions
-    for idx = 1, #out do
+    -- Skip first waypoint (idx=1) to preserve actual player start position
+    for idx = 2, #out do
         local wp = out[idx]
         local owner = owners[idx] or 0
         if owner > 0 and owner <= #polyPath then
