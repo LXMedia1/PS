@@ -130,6 +130,7 @@ end
 -- =========================
 
 local EDGE_MARGIN = 10.0  -- 10 yards from dangerous edges
+local FLOOR_HEIGHT_OFFSET = 0.5  -- Small offset above ground for path visualization
 
 local function adjust_waypoint_for_safety(tile, poly, x, y, margin)
     local pv = tile.pVertCount[poly]
@@ -167,6 +168,22 @@ local function adjust_waypoint_for_safety(tile, poly, x, y, margin)
     end
 
     return x, y
+end
+
+-- =========================
+-- Floor Height Snapping
+-- =========================
+
+local vec3 = require("common/geometry/vector_3")
+
+-- Snap Z coordinate to actual floor height using game API
+local function snap_to_floor(x, y, z)
+    local pos = vec3.new(x, y, z)
+    local floor_z = core.get_height_for_position(pos)
+    if floor_z and floor_z > 0 then
+        return floor_z + FLOOR_HEIGHT_OFFSET
+    end
+    return z  -- Fallback to original Z if API fails
 end
 
 -- =========================
@@ -1771,6 +1788,11 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
             end
         end
         dbg(string.format("  WP[%d]: (%.1f, %.1f, %.1f)", i, wp.x, wp.y, wp.z or 0))
+    end
+
+    -- Snap all waypoints to actual floor height using game API
+    for i, wp in ipairs(waypoints) do
+        wp.z = snap_to_floor(wp.x, wp.y, wp.z or startZ)
     end
 
     dbg("=== SUCCESS ===")
