@@ -184,19 +184,11 @@ local floor_snap_state = {
     start_z = 0,
 }
 
--- Height offset above polygon to start raycast (ensures we scan DOWN to ground, not through it)
-local RAYCAST_HEIGHT_ABOVE = 15.0
-
--- Snap single waypoint to floor height (used by async processor)
+-- Floor snapping is now handled inline in poly_path_to_waypoints()
+-- This function is kept for compatibility but does nothing
 local function snap_waypoint_to_floor(wp, fallback_z)
-    -- Start raycast from ABOVE the current Z to scan down to ground
-    -- This prevents scanning through the floor to lower levels
-    local scan_z = (wp.z or fallback_z) + RAYCAST_HEIGHT_ABOVE
-    local pos = vec3.new(wp.x, wp.y, scan_z)
-    local floor_z = core.get_height_for_position(pos)
-    if floor_z and floor_z > 0 then
-        wp.z = floor_z + FLOOR_HEIGHT_OFFSET
-    end
+    -- Height is already set correctly with floor-level continuity in funnel
+    -- No additional processing needed
 end
 
 -- Process floor snapping incrementally (call each frame from main.lua)
@@ -1045,7 +1037,9 @@ local function straightenPathGreedy(polyPath, startPos, endPos, world)
     end
 
     local waypoints = {}
+    local owners = {}
     waypoints[1] = {x = startPos.x, y = startPos.y, z = startPos.z}
+    owners[1] = 1  -- Start owned by first polygon
 
     local i = 1  -- Current corridor index
     local iteration = 0
@@ -1070,6 +1064,7 @@ local function straightenPathGreedy(polyPath, startPos, endPos, world)
         if visible then
             -- Direct line to end is clear!
             waypoints[#waypoints + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
+            owners[#owners + 1] = #polyPath  -- End owned by last polygon
             logPathDebug("Direct path to END is clear - adding final waypoint")
             break
         end
@@ -1080,6 +1075,7 @@ local function straightenPathGreedy(polyPath, startPos, endPos, world)
         if k >= #polyPath then
             -- Safety fallback - just go to end
             waypoints[#waypoints + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
+            owners[#owners + 1] = #polyPath  -- End owned by last polygon
             logPathDebug("k >= #polyPath, adding end as fallback")
             break
         end
@@ -1092,6 +1088,7 @@ local function straightenPathGreedy(polyPath, startPos, endPos, world)
             local cx, cy, cz = getPolyCenterXY(world, polyPath[k + 1])
             if cx then
                 waypoints[#waypoints + 1] = {x = cx, y = cy, z = cz or startPos.z}
+                owners[#owners + 1] = k + 1  -- Owned by polygon we're entering
                 logPathDebug(string.format("No portal found, using poly center: (%.2f, %.2f)", cx, cy))
             end
             i = k + 1
@@ -1099,18 +1096,12 @@ local function straightenPathGreedy(polyPath, startPos, endPos, world)
             -- Find optimal steering point on the portal
             local steerPt = steerPointOnPortal(curr, endPos, portalA, portalB, 0.5)
 
-            -- Estimate Z by interpolation
-            local dx = endPos.x - curr.x
-            local dy = endPos.y - curr.y
-            local lenSq = dx * dx + dy * dy + 1e-6
-            local t = ((steerPt.x - curr.x) * dx + (steerPt.y - curr.y) * dy) / lenSq
-            t = math.max(0, math.min(1, t))
-            local z = curr.z + (endPos.z - curr.z) * t
-
-            waypoints[#waypoints + 1] = {x = steerPt.x, y = steerPt.y, z = z}
+            -- Z will be fixed by fixWaypointHeights (placeholder for now)
+            waypoints[#waypoints + 1] = {x = steerPt.x, y = steerPt.y, z = curr.z}
+            owners[#owners + 1] = k + 1  -- Owned by polygon we're entering
 
             logPathDebug(string.format("Portal k=%d: A=(%.2f,%.2f) B=(%.2f,%.2f)", k, portalA.x, portalA.y, portalB.x, portalB.y))
-            logPathDebug(string.format("Steer point: (%.2f, %.2f, %.2f)", steerPt.x, steerPt.y, z))
+            logPathDebug(string.format("Steer point: (%.2f, %.2f) owner=%d", steerPt.x, steerPt.y, k + 1))
 
             i = k + 1
         end
@@ -1120,15 +1111,16 @@ local function straightenPathGreedy(polyPath, startPos, endPos, world)
     local lastWp = waypoints[#waypoints]
     if math.abs(lastWp.x - endPos.x) > 0.1 or math.abs(lastWp.y - endPos.y) > 0.1 then
         waypoints[#waypoints + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
+        owners[#owners + 1] = #polyPath  -- End owned by last polygon
         logPathDebug("Added final endpoint")
     end
 
-    logPathDebug(string.format("\n=== FINAL PATH: %d waypoints ===", #waypoints))
+    logPathDebug(string.format("\n=== FINAL PATH: %d waypoints, %d owners ===", #waypoints, #owners))
     for wi, wp in ipairs(waypoints) do
-        logPathDebug(string.format("WP[%d]: (%.2f, %.2f, %.2f)", wi, wp.x, wp.y, wp.z))
+        logPathDebug(string.format("WP[%d]: (%.2f, %.2f, %.2f) owner=%d", wi, wp.x, wp.y, wp.z, owners[wi] or 0))
     end
 
-    return waypoints
+    return waypoints, owners
 end
 
 -- Safe distance: find distance to nearest boundary edge and push waypoint away
@@ -1227,6 +1219,164 @@ local function applySafeDistance(waypoints, polyPath, world)
     return waypoints
 end
 
+-- Repair waypoint ownership if it was pushed outside its original owner polygon
+-- Only searches within ±2 corridor positions to avoid wrong-floor selection
+local function repairOwnerInCorridor(world, polyPath, ownerIdx, x, y, nq, radius)
+    radius = radius or 2
+    local from = math.max(1, ownerIdx - radius)
+    local to = math.min(#polyPath, ownerIdx + radius)
+
+    -- First check if still inside current owner
+    local currTileId, currPoly = decode_node(polyPath[ownerIdx])
+    local currTile = world.tilesById[currTileId]
+    if currTile and nq:point_in_poly(currTile, currPoly, x, y) then
+        return ownerIdx  -- Still inside, no repair needed
+    end
+
+    -- Search nearby corridor polygons
+    for k = from, to do
+        if k ~= ownerIdx then
+            local tileId, poly = decode_node(polyPath[k])
+            local tile = world.tilesById[tileId]
+            if tile and nq:point_in_poly(tile, poly, x, y) then
+                return k  -- Found containing polygon
+            end
+        end
+    end
+
+    return ownerIdx  -- No better match found, keep original
+end
+
+-- Get vertex position for detail triangle
+-- If vertIdx < polyVertCount: use main polygon vertex
+-- If vertIdx >= polyVertCount: use detail vertex at vertBase + (vertIdx - polyVertCount)
+local function get_detail_vert(tile, poly, vertIdx)
+    local base = (poly - 1) * 6
+    local nv = tile.pVertCount[poly]
+
+    if vertIdx < nv then
+        -- Main polygon vertex
+        local vi = tile.pVerts[base + vertIdx + 1]
+        return tile.vx[vi], tile.vy[vi], tile.vz[vi]
+    else
+        -- Detail vertex
+        local detail = tile.detailMeshes and tile.detailMeshes[poly]
+        if detail then
+            local di = detail.vertBase + (vertIdx - nv) + 1  -- +1 for Lua 1-based
+            return tile.detailVx[di], tile.detailVy[di], tile.detailVz[di]
+        end
+    end
+    return nil, nil, nil
+end
+
+-- Check if point (px, py) is inside triangle (ax,ay), (bx,by), (cx,cy) in 2D
+-- Returns true and barycentric coords (u, v, w) if inside
+local function point_in_triangle_2d(px, py, ax, ay, bx, by, cx, cy)
+    local v0x, v0y = cx - ax, cy - ay
+    local v1x, v1y = bx - ax, by - ay
+    local v2x, v2y = px - ax, py - ay
+
+    local dot00 = v0x * v0x + v0y * v0y
+    local dot01 = v0x * v1x + v0y * v1y
+    local dot02 = v0x * v2x + v0y * v2y
+    local dot11 = v1x * v1x + v1y * v1y
+    local dot12 = v1x * v2x + v1y * v2y
+
+    local denom = dot00 * dot11 - dot01 * dot01
+    if math.abs(denom) < 1e-10 then return false end
+
+    local invDenom = 1 / denom
+    local u = (dot11 * dot02 - dot01 * dot12) * invDenom
+    local v = (dot00 * dot12 - dot01 * dot02) * invDenom
+
+    if u >= 0 and v >= 0 and (u + v) <= 1 then
+        local w = 1 - u - v
+        return true, w, v, u  -- Barycentric coords for vertices a, b, c
+    end
+    return false
+end
+
+-- Sample height at (x, y) from polygon's detail mesh triangles
+-- Returns height if found, nil otherwise
+local function sample_detail_height(tile, poly, x, y)
+    local detail = tile.detailMeshes and tile.detailMeshes[poly]
+    if not detail or detail.triCount == 0 then
+        return nil
+    end
+
+    -- Loop through detail triangles for this polygon
+    for t = 0, detail.triCount - 1 do
+        local triIdx = (detail.triBase + t) * 4  -- Flattened array: each tri = 4 values
+        local v0i = tile.detailTris[triIdx + 1]
+        local v1i = tile.detailTris[triIdx + 2]
+        local v2i = tile.detailTris[triIdx + 3]
+
+        if v0i and v1i and v2i then
+            local ax, ay, az = get_detail_vert(tile, poly, v0i)
+            local bx, by, bz = get_detail_vert(tile, poly, v1i)
+            local cx, cy, cz = get_detail_vert(tile, poly, v2i)
+
+            if ax and bx and cx then
+                local inside, wa, wb, wc = point_in_triangle_2d(x, y, ax, ay, bx, by, cx, cy)
+                if inside then
+                    -- Barycentric interpolation for Z
+                    return wa * az + wb * bz + wc * cz
+                end
+            end
+        end
+    end
+
+    return nil  -- Point not in any detail triangle
+end
+
+-- Fix waypoint Z heights using polygon ownership
+-- First repairs ownership if waypoint was pushed into adjacent corridor poly,
+-- then samples height from detail mesh triangles (not just pCz)
+local function fixWaypointHeights(waypoints, owners, polyPath, world, startPos, nq)
+    local prevZ = startPos.z
+
+    for idx = 1, #waypoints do
+        local wp = waypoints[idx]
+        local owner = owners[idx] or 1
+
+        if owner > 0 and owner <= #polyPath then
+            -- Repair ownership if safe distance pushed waypoint into adjacent corridor poly
+            owner = repairOwnerInCorridor(world, polyPath, owner, wp.x, wp.y, nq)
+            owners[idx] = owner  -- Update for debug logging
+
+            local tileId, poly = decode_node(polyPath[owner])
+            local tile = world.tilesById[tileId]
+
+            if tile then
+                -- Clamp waypoint XY to polygon boundary if still outside
+                local cx, cy = nq:clamp_to_poly(tileId, poly, wp.x, wp.y)
+                wp.x, wp.y = cx, cy
+
+                -- Sample height from detail mesh triangles (accurate for slopes)
+                local hz = sample_detail_height(tile, poly, wp.x, wp.y)
+
+                -- Fallback to polygon center Z if detail sampling fails
+                if not hz then
+                    hz = tile.pCz[poly]
+                end
+
+                if hz then
+                    wp.z = hz + 0.5  -- Small offset above ground
+                else
+                    wp.z = prevZ
+                end
+            else
+                wp.z = prevZ
+            end
+        else
+            -- End waypoint or unknown owner - use previous Z
+            wp.z = prevZ
+        end
+
+        prevZ = wp.z
+    end
+end
+
 -- =========================
 -- Funnel Algorithm
 -- =========================
@@ -1259,11 +1409,14 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
         local clampedStart = {x = sx, y = sy, z = startPos.z}
         local clampedEnd = {x = ex, y = ey, z = endPos.z}
 
-        -- Generate path using visibility-based straightening
-        local out = straightenPathGreedy(polyPath, clampedStart, clampedEnd, world)
+        -- Generate path using visibility-based straightening (returns owners too)
+        local out, owners = straightenPathGreedy(polyPath, clampedStart, clampedEnd, world)
 
-        -- Apply safe distance from walls
+        -- Apply safe distance from walls (may push waypoints slightly)
         out = applySafeDistance(out, polyPath, world)
+
+        -- Fix Z heights using polygon ownership (clamps XY if pushed outside)
+        fixWaypointHeights(out, owners, polyPath, world, startPos, self)
 
         return out
     end
@@ -1430,25 +1583,21 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
         end
     end
 
-    -- HEIGHT FIX: Apply heights to all waypoints by sampling from owner polygon
-    local prevZ = startPos.z
+    -- HEIGHT: Use polygon center Z (average of vertex heights)
     for idx = 1, #out do
         local wp = out[idx]
         local owner = owners[idx] or 0
 
-        if owner == 0 then
-            -- End waypoint: use endPos.z
-            wp.z = endPos.z
-        else
-            -- Sample height from owner polygon's detail mesh
-            local h = sample_wp_height(self, polyPath, owner, wp.x, wp.y, prevZ)
-            if h then
-                wp.z = h
+        if owner > 0 and owner <= #polyPath then
+            local tileId, poly = decode_node(polyPath[owner])
+            local tile = world.tilesById[tileId]
+            if tile and tile.pCz[poly] then
+                wp.z = tile.pCz[poly] + 0.5
             else
-                -- Fallback: maintain Z continuity (prevents spikes)
-                wp.z = prevZ
+                wp.z = startPos.z + 0.5
             end
-            prevZ = wp.z
+        else
+            wp.z = startPos.z + 0.5
         end
     end
 
@@ -1616,60 +1765,9 @@ end
 -- Height Sampling
 -- =========================
 
--- Get height at point from detail triangles
--- NEW: Clamps point to polygon boundary before sampling (fixes underground waypoints)
--- Returns: z height, or nil if not found
+-- Get height at point - simple polygon center Z
+-- The polygon center is the average of vertex heights, which is correct for that polygon
 function NavQuery:get_height_at(tile, poly, x, y)
-    local dm = tile.detailMeshes[poly]
-    if not dm then return nil end
-
-    local pv = tile.pVertCount[poly]
-    local base = (poly - 1) * 6
-
-    -- Build poly verts arrays for clamp/inside tests (max 6 verts)
-    local vx, vy = {}, {}
-    for i = 1, pv do
-        local vi = tile.pVerts[base + i]
-        vx[i] = tile.vx[vi]
-        vy[i] = tile.vy[vi]
-    end
-
-    -- CLAMP: If point is outside polygon, clamp to closest point on boundary
-    if not point_in_poly_xy(x, y, vx, vy, pv) then
-        x, y = closest_point_on_poly_xy(x, y, vx, vy, pv)
-    end
-
-    -- Helper: get vertex by detail triangle index (0-based index from Detour)
-    local function getv(idx)
-        if idx < pv then
-            -- Main polygon vertex
-            local vi = tile.pVerts[base + idx + 1]
-            return tile.vx[vi], tile.vy[vi], tile.vz[vi]
-        else
-            -- Detail vertex
-            local dv = dm.vertBase + (idx - pv) + 1
-            return tile.detailVx[dv], tile.detailVy[dv], tile.detailVz[dv]
-        end
-    end
-
-    -- Check each detail triangle with robust barycentric test
-    for t = 0, dm.triCount - 1 do
-        local ti = (dm.triBase + t) * 4
-        local i0 = tile.detailTris[ti + 1]
-        local i1 = tile.detailTris[ti + 2]
-        local i2 = tile.detailTris[ti + 3]
-
-        local ax, ay, az = getv(i0)
-        local bx, by, bz = getv(i1)
-        local cx, cy, cz = getv(i2)
-
-        -- Use robust tri_height_xy with relaxed tolerance
-        local hz = tri_height_xy(x, y, ax, ay, az, bx, by, bz, cx, cy, cz)
-        if hz then return hz end
-    end
-
-    -- Fallback: return polygon center Z if no triangle hit
-    -- This happens rarely but prevents nil values
     return tile.pCz[poly]
 end
 

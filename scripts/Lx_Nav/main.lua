@@ -30,6 +30,8 @@ local menu_elements = {
     path_enabled = core.menu.checkbox(false, "lx_nav_path_enabled"),
     path_to_target = core.menu.button("lx_nav_path_to_target"),
     path_to_click = core.menu.button("lx_nav_path_to_click"),
+    save_safe_pos = core.menu.button("lx_nav_save_safe_pos"),
+    path_to_safe_pos = core.menu.button("lx_nav_path_to_safe_pos"),
     path_clear = core.menu.button("lx_nav_path_clear"),
     -- Test controls
     test_tree = core.menu.tree_node(),
@@ -52,6 +54,11 @@ local PathState = {
     stats = nil,      -- Path stats
     targetPos = nil,  -- Target position {x,y,z}
 }
+
+-- Click-to-path and safe position state
+local click_to_path_mode = false
+local saved_safe_pos = nil  -- {x, y, z, map_id}
+local prev_mouse_down = false  -- For click edge detection
 
 -- Test binary reading helpers
 local function test_binary_helpers()
@@ -1803,6 +1810,22 @@ local function on_update()
     -- Process floor height snapping incrementally (non-blocking)
     NavQuery.process_floor_snapping(3)  -- 3 waypoints per frame
 
+    -- Handle click-to-path mode
+    if click_to_path_mode then
+        local mouse_down = core.input.is_key_pressed(0x01)
+        if mouse_down and not prev_mouse_down then  -- Rising edge = click
+            local world_pos = core.graphics.get_cursor_world_position()
+            if world_pos then
+                find_path_to(world_pos.x, world_pos.y, world_pos.z)
+                click_to_path_mode = false
+                Debug.log("[Path] Click destination set")
+            end
+        end
+        prev_mouse_down = mouse_down
+    else
+        prev_mouse_down = core.input.is_key_pressed(0x01)
+    end
+
     -- Process extraction coroutine (frame-budgeted)
     if ExtractState.running then
         process_extraction()
@@ -1909,9 +1932,28 @@ local function on_render_menu()
                 find_path_to_target()
             end
 
-            if menu_elements.path_to_click:render("Path to Click") then
-                -- TODO: Implement click-to-path
-                Debug.log("[Path] Click-to-path not yet implemented")
+            local click_label = click_to_path_mode and "Path to Click [ACTIVE]" or "Path to Click"
+            if menu_elements.path_to_click:render(click_label) then
+                click_to_path_mode = not click_to_path_mode
+                Debug.log(click_to_path_mode and "[Path] Click mode ON" or "[Path] Click mode OFF")
+            end
+
+            if menu_elements.save_safe_pos:render("Save Safe Pos") then
+                local player = core.object_manager.get_local_player()
+                if player then
+                    local pos = player:get_position()
+                    saved_safe_pos = {x = pos.x, y = pos.y, z = pos.z, map_id = core.get_instance_id()}
+                    Debug.log(string.format("[Safe] Saved: %.1f, %.1f, %.1f", pos.x, pos.y, pos.z))
+                end
+            end
+
+            local safe_label = saved_safe_pos and "Path to Safe Pos" or "Path to Safe Pos (none)"
+            if menu_elements.path_to_safe_pos:render(safe_label) then
+                if saved_safe_pos and core.get_instance_id() == saved_safe_pos.map_id then
+                    find_path_to(saved_safe_pos.x, saved_safe_pos.y, saved_safe_pos.z)
+                else
+                    Debug.log_warning("[Path] No safe pos or wrong map")
+                end
             end
 
             if menu_elements.path_clear:render("Clear Path") then
