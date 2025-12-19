@@ -200,6 +200,9 @@ local NavConstants = require("modules/nav_constants")
 -- Slope threshold for climbing (must match wireframe.lua)
 local MAX_WALKABLE_SLOPE = 0.9
 
+-- Penalty multiplier for polygons near boundaries (walls/cliffs/edges)
+local BOUNDARY_PENALTY = 8.0  -- Strong preference for interior polygons
+
 local function step_cost(tileA, polyA, tileB, polyB)
     -- Get polygon centers
     local ax, ay, az = tileA.pCx[polyA], tileA.pCy[polyA], tileA.pCz[polyA]
@@ -252,6 +255,26 @@ local function step_cost(tileA, polyA, tileB, polyB)
         c = c * 1.5  -- Water is slower
     elseif area == NavConstants.Area.DANGER then
         c = c * 20.0  -- Avoid dangerous areas
+    end
+
+    -- BOUNDARY PENALTY: Penalize polygons that have boundary edges (walls/cliffs)
+    -- This makes A* prefer interior paths over edge-hugging paths
+    local baseB = (polyB - 1) * 6
+    local nvB = tileB.pVertCount[polyB]
+    local boundaryEdges = 0
+
+    for e = 1, nvB do
+        local nei = tileB.pNeis[baseB + e]
+        if nei == 0 then
+            -- This edge has no neighbor (wall/cliff/boundary)
+            boundaryEdges = boundaryEdges + 1
+        end
+    end
+
+    -- Apply penalty based on number of boundary edges
+    if boundaryEdges > 0 then
+        -- More boundary edges = higher penalty
+        c = c * (1.0 + (boundaryEdges * (BOUNDARY_PENALTY - 1.0) / nvB))
     end
 
     return c
@@ -564,8 +587,580 @@ function NavQuery:scan_for_offmesh(polyPath)
 end
 
 -- =========================
+-- Corridor Raycast & Visibility (Detour-style)
+-- =========================
+
+-- 2D cross product (used for half-plane tests)
+local function cross2D(ax, ay, bx, by)
+    return ax * by - ay * bx
+end
+
+-- Get polygon vertices in XY for a given tile/poly
+-- Returns: array of {x, y}, vertex count
+local function getPolyVertsXY(world, tileId, poly)
+    local tile = world.tilesById[tileId]
+    if not tile then return nil, 0 end
+
+    local base = (poly - 1) * 6
+    local nv = tile.pVertCount[poly]
+    local verts = {}
+
+    for i = 1, nv do
+        local vi = tile.pVerts[base + i]
+        verts[i] = {x = tile.vx[vi], y = tile.vy[vi]}
+    end
+
+    return verts, nv
+end
+
+-- Get neighbor polygon across edge e (returns polyRef or nil if boundary)
+local function getNeighborAcrossEdge(world, tileId, poly, edgeIdx)
+    local tile = world.tilesById[tileId]
+    if not tile then return nil, nil end
+
+    local base = (poly - 1) * 6
+    local nei = tile.pNeis[base + edgeIdx]
+
+    if nei == 0 then
+        return nil, nil  -- Boundary edge (no neighbor)
+    elseif nei >= 0x8000 then
+        -- External edge (cross-tile)
+        local extTile = tile.extToTile[base + edgeIdx]
+        local extPoly = tile.extToPoly[base + edgeIdx]
+        if extTile and extPoly then
+            return extTile, extPoly
+        end
+        return nil, nil
+    else
+        -- Internal neighbor
+        return tileId, nei
+    end
+end
+
+-- Find where segment exits a convex polygon (2D in XY plane)
+-- Assumes p0 is inside the polygon
+-- Returns: tExit (0-1), exitEdge (1..n), or (1, nil) if stays inside
+local EPS_RAYCAST = 1e-5
+
+local function firstExitConvexPoly(verts, nv, p0x, p0y, p1x, p1y)
+    local bestT = 1.0
+    local bestE = nil
+
+    for i = 1, nv do
+        local a = verts[i]
+        local b = verts[(i % nv) + 1]
+
+        local ex = b.x - a.x
+        local ey = b.y - a.y
+
+        -- Signed distances to edge half-plane using cross(edge, point-a)
+        -- For CCW polys, "inside" is cross >= 0 (left of each directed edge)
+        local d0 = cross2D(ex, ey, p0x - a.x, p0y - a.y)
+        local d1 = cross2D(ex, ey, p1x - a.x, p1y - a.y)
+
+        if d1 < -EPS_RAYCAST then
+            -- Segment endpoint is outside w.r.t. this edge
+            if d0 < -EPS_RAYCAST then
+                -- Start is outside too (shouldn't happen if p0 is inside)
+                return 0.0, i
+            end
+
+            -- Intersection parameter where we cross this edge plane
+            local denom = d0 - d1
+            if math.abs(denom) > EPS_RAYCAST then
+                local t = d0 / denom
+                if t < bestT then
+                    bestT = t
+                    bestE = i
+                end
+            end
+        end
+    end
+
+    return bestT, bestE
+end
+
+-- Corridor-limited raycast: checks if segment A→B stays within corridor
+-- Returns: visible (bool), hitT (0-1), hitPolyIdx, hitEdge
+local function raycastCorridor(Ax, Ay, Bx, By, polyPath, startIdx, endIdx, world)
+    local px, py = Ax, Ay
+
+    for k = startIdx, endIdx do
+        local tileId, poly = decode_node(polyPath[k])
+        local verts, nv = getPolyVertsXY(world, tileId, poly)
+
+        if not verts then
+            return false, 0, k, nil
+        end
+
+        local tExit, eExit = firstExitConvexPoly(verts, nv, px, py, Bx, By)
+
+        if not eExit then
+            -- Segment endpoint lies in this poly (never exits)
+            if k == endIdx then
+                return true, 1.0, nil, nil  -- Visible!
+            end
+            -- Expected to reach later polys but didn't exit - treat as failure
+            return false, 1.0, k, nil
+        end
+
+        if k == endIdx then
+            -- We're at target poly, segment stays inside or exits at boundary
+            return true, 1.0, nil, nil
+        end
+
+        -- Check if exit edge leads to next corridor polygon
+        local nextTileId, nextPoly = decode_node(polyPath[k + 1])
+        local neiTileId, neiPoly = getNeighborAcrossEdge(world, tileId, poly, eExit)
+
+        if neiTileId ~= nextTileId or neiPoly ~= nextPoly then
+            -- Exiting through wrong edge (not the portal to next poly)
+            return false, tExit, k, eExit
+        end
+
+        -- Step a tiny bit past the boundary
+        local tStep = math.min(1.0, tExit + 1e-4)
+        px = Ax + (Bx - Ax) * tStep
+        py = Ay + (By - Ay) * tStep
+    end
+
+    return true, 1.0, nil, nil
+end
+
+-- Get polygon center XY
+local function getPolyCenterXY(world, nodeId)
+    local tileId, poly = decode_node(nodeId)
+    local tile = world.tilesById[tileId]
+    if tile then
+        return tile.pCx[poly], tile.pCy[poly], tile.pCz[poly]
+    end
+    return nil, nil, nil
+end
+
+-- Debug logging for path analysis
+local PATH_DEBUG_LOG = "LX_Nav_path_analysis.log"
+local PATH_DEBUG_ENABLED = true
+
+local function logPathDebug(msg)
+    if PATH_DEBUG_ENABLED then
+        core.write_log_file(PATH_DEBUG_LOG, msg .. "\n")
+    end
+end
+
+local function logPolygonData(world, polyPath)
+    logPathDebug("=== POLYGON PATH DATA ===")
+    logPathDebug(string.format("Total polygons in path: %d", #polyPath))
+
+    for i = 1, #polyPath do
+        local tileId, poly = decode_node(polyPath[i])
+        local tile = world.tilesById[tileId]
+
+        if tile then
+            local base = (poly - 1) * 6
+            local nv = tile.pVertCount[poly]
+            local cx, cy, cz = tile.pCx[poly], tile.pCy[poly], tile.pCz[poly]
+
+            logPathDebug(string.format("\n[Poly %d] tile=%d, poly=%d, center=(%.2f, %.2f, %.2f), verts=%d",
+                i, tileId, poly, cx or 0, cy or 0, cz or 0, nv or 0))
+
+            -- Log vertices
+            for v = 1, (nv or 0) do
+                local vi = tile.pVerts[base + v]
+                if vi then
+                    local vx, vy = tile.vx[vi], tile.vy[vi]
+                    logPathDebug(string.format("  vert[%d]: idx=%d, pos=(%.2f, %.2f)", v, vi, vx or 0, vy or 0))
+                end
+            end
+
+            -- Log neighbors
+            for e = 1, (nv or 0) do
+                local nei = tile.pNeis[base + e]
+                local neiStr = "boundary"
+                if nei and nei > 0 then
+                    if nei >= 0x8000 then
+                        local extTile = tile.extToTile[base + e]
+                        local extPoly = tile.extToPoly[base + e]
+                        neiStr = string.format("external(tile=%s, poly=%s)", tostring(extTile), tostring(extPoly))
+                    else
+                        neiStr = string.format("internal(poly=%d)", nei)
+                    end
+                end
+                logPathDebug(string.format("  edge[%d]: nei=%s (raw=%s)", e, neiStr, tostring(nei)))
+            end
+        else
+            logPathDebug(string.format("\n[Poly %d] tile=%d, poly=%d - TILE NOT LOADED", i, tileId, poly))
+        end
+    end
+    logPathDebug("")
+end
+
+-- =========================
+-- Portal Steering (Research-based optimal waypoint placement)
+-- =========================
+
+-- Find the optimal steering point on a portal edge
+-- Maximizes progress toward goal while staying on the portal
+-- Shrinks portal inward to keep distance from walls at endpoints
+local PORTAL_SHRINK = 3.0  -- yards - shrink portal endpoints inward
+
+local function steerPointOnPortal(curr, goal, portalA, portalB, w)
+    w = w or 0.5  -- Weight for deviation penalty
+
+    local function dot(ax, ay, bx, by) return ax * bx + ay * by end
+    local function len(ax, ay) return math.sqrt(ax * ax + ay * ay) end
+
+    -- Shrink the portal inward to avoid placing waypoints at wall-adjacent endpoints
+    local edgeX = portalB.x - portalA.x
+    local edgeY = portalB.y - portalA.y
+    local edgeLen = len(edgeX, edgeY)
+
+    local shrinkA, shrinkB = portalA, portalB
+    if edgeLen > PORTAL_SHRINK * 2.5 then
+        -- Shrink both endpoints inward
+        local shrinkT = PORTAL_SHRINK / edgeLen
+        shrinkA = {x = portalA.x + edgeX * shrinkT, y = portalA.y + edgeY * shrinkT}
+        shrinkB = {x = portalB.x - edgeX * shrinkT, y = portalB.y - edgeY * shrinkT}
+    elseif edgeLen > 1.0 then
+        -- Portal too small to shrink fully - just use midpoint region
+        shrinkA = {x = portalA.x + edgeX * 0.3, y = portalA.y + edgeY * 0.3}
+        shrinkB = {x = portalB.x - edgeX * 0.3, y = portalB.y - edgeY * 0.3}
+    end
+
+    -- Direction to goal
+    local dx, dy = goal.x - curr.x, goal.y - curr.y
+    local dl = len(dx, dy)
+    if dl < 1e-6 then
+        return {x = (shrinkA.x + shrinkB.x) * 0.5, y = (shrinkA.y + shrinkB.y) * 0.5}
+    end
+    dx, dy = dx / dl, dy / dl
+
+    -- Distance from point to infinite line through curr->goal
+    local function distPointToLine(p)
+        local nx, ny = -dy, dx  -- Line normal
+        return math.abs((p.x - curr.x) * nx + (p.y - curr.y) * ny)
+    end
+
+    -- Find point on segment AB closest to the line curr->goal
+    local function closestPointOnSegmentToLine(a, b)
+        local nx, ny = -dy, dx  -- Line normal
+        local function signedDist(p)
+            return (p.x - curr.x) * nx + (p.y - curr.y) * ny
+        end
+        local da = signedDist(a)
+        local db = signedDist(b)
+        if da == 0 then return {x = a.x, y = a.y} end
+        if db == 0 then return {x = b.x, y = b.y} end
+        if da * db < 0 then
+            -- Line crosses segment - find intersection
+            local t = da / (da - db)
+            return {x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t}
+        end
+        -- No crossing; return closer endpoint
+        if math.abs(da) < math.abs(db) then
+            return {x = a.x, y = a.y}
+        else
+            return {x = b.x, y = b.y}
+        end
+    end
+
+    -- Candidate points on the SHRUNK portal (away from wall endpoints)
+    local A = shrinkA
+    local B = shrinkB
+    local M = {x = (A.x + B.x) * 0.5, y = (A.y + B.y) * 0.5}  -- Midpoint
+    local Q = closestPointOnSegmentToLine(A, B)  -- Closest to goal line
+
+    local candidates = {A, B, M, Q}
+
+    -- Score each candidate: progress toward goal minus deviation penalty
+    local bestP = M  -- Default to midpoint
+    local bestScore = -1e30
+
+    for _, p in ipairs(candidates) do
+        local vx, vy = p.x - curr.x, p.y - curr.y
+        local progress = dot(vx, vy, dx, dy)
+        local deviation = distPointToLine(p)
+        local score = progress - w * deviation
+
+        if score > bestScore then
+            bestScore = score
+            bestP = p
+        end
+    end
+
+    return bestP
+end
+
+-- Get portal edge endpoints between two adjacent polygons in the corridor
+-- Returns: portalA {x,y}, portalB {x,y} or nil, nil if not found
+local function getPortalEndpoints(polyPath, fromIdx, toIdx, world)
+    if fromIdx < 1 or toIdx > #polyPath then
+        return nil, nil
+    end
+
+    local tileAId, polyA = decode_node(polyPath[fromIdx])
+    local tileBId, polyB = decode_node(polyPath[toIdx])
+    local tileA = world.tilesById[tileAId]
+
+    if not tileA then
+        return nil, nil
+    end
+
+    local baseA = (polyA - 1) * 6
+    local nvA = tileA.pVertCount[polyA]
+
+    -- Find the edge connecting polyA to polyB
+    local x0, y0, x1, y1
+
+    if tileAId == tileBId then
+        -- Intra-tile: find edge where neis[e] == polyB
+        for e = 1, nvA do
+            if tileA.pNeis[baseA + e] == polyB then
+                local v0 = tileA.pVerts[baseA + e]
+                local v1 = tileA.pVerts[baseA + (e % nvA) + 1]
+                x0, y0 = tileA.vx[v0], tileA.vy[v0]
+                x1, y1 = tileA.vx[v1], tileA.vy[v1]
+                break
+            end
+        end
+    else
+        -- Cross-tile: find edge where extToTile/extToPoly match
+        for e = 1, nvA do
+            local idx = baseA + e
+            if tileA.extToTile[idx] == tileBId and tileA.extToPoly[idx] == polyB then
+                local v0 = tileA.pVerts[baseA + e]
+                local v1 = tileA.pVerts[baseA + (e % nvA) + 1]
+                x0, y0 = tileA.vx[v0], tileA.vy[v0]
+                x1, y1 = tileA.vx[v1], tileA.vy[v1]
+                break
+            end
+        end
+    end
+
+    if not x0 then
+        return nil, nil
+    end
+
+    return {x = x0, y = y0}, {x = x1, y = y1}
+end
+
+-- Portal-based path straightening (research-based optimal algorithm)
+-- Places waypoints on portal edges, not polygon centers
+local function straightenPathGreedy(polyPath, startPos, endPos, world)
+    -- Initialize debug log
+    if PATH_DEBUG_ENABLED then
+        core.create_log_file(PATH_DEBUG_LOG)
+        logPathDebug("=== PORTAL-BASED PATH STRAIGHTENING ===")
+        logPathDebug(string.format("Start: (%.2f, %.2f, %.2f)", startPos.x, startPos.y, startPos.z))
+        logPathDebug(string.format("End: (%.2f, %.2f, %.2f)", endPos.x, endPos.y, endPos.z))
+        logPathDebug(string.format("Polygon path length: %d", #polyPath))
+        logPolygonData(world, polyPath)
+    end
+
+    if #polyPath == 0 then
+        logPathDebug("Empty polyPath, returning direct line to end")
+        return {{x = endPos.x, y = endPos.y, z = endPos.z}}
+    end
+
+    if #polyPath == 1 then
+        logPathDebug("Single polygon, returning start->end")
+        return {
+            {x = startPos.x, y = startPos.y, z = startPos.z},
+            {x = endPos.x, y = endPos.y, z = endPos.z}
+        }
+    end
+
+    local waypoints = {}
+    waypoints[1] = {x = startPos.x, y = startPos.y, z = startPos.z}
+
+    local i = 1  -- Current corridor index
+    local iteration = 0
+    local maxIterations = #polyPath + 5  -- Safety limit
+
+    while i < #polyPath and iteration < maxIterations do
+        iteration = iteration + 1
+        local curr = waypoints[#waypoints]
+
+        logPathDebug(string.format("\n--- Iteration %d: at corridor index %d, pos=(%.2f, %.2f) ---",
+            iteration, i, curr.x, curr.y))
+
+        -- Try to go directly to end through entire remaining corridor
+        local visible, hitT, hitK, hitEdge = raycastCorridor(
+            curr.x, curr.y, endPos.x, endPos.y,
+            polyPath, i, #polyPath, world
+        )
+
+        logPathDebug(string.format("Raycast to END: visible=%s, hitK=%s, hitEdge=%s, hitT=%.3f",
+            tostring(visible), tostring(hitK), tostring(hitEdge), hitT or 0))
+
+        if visible then
+            -- Direct line to end is clear!
+            waypoints[#waypoints + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
+            logPathDebug("Direct path to END is clear - adding final waypoint")
+            break
+        end
+
+        -- Blocked at corridor index hitK
+        -- Steer to the NEXT portal (hitK -> hitK+1)
+        local k = hitK or i
+        if k >= #polyPath then
+            -- Safety fallback - just go to end
+            waypoints[#waypoints + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
+            logPathDebug("k >= #polyPath, adding end as fallback")
+            break
+        end
+
+        -- Get the portal between poly[k] and poly[k+1]
+        local portalA, portalB = getPortalEndpoints(polyPath, k, k + 1, world)
+
+        if not portalA then
+            -- Fallback: use polygon center (shouldn't happen with valid corridor)
+            local cx, cy, cz = getPolyCenterXY(world, polyPath[k + 1])
+            if cx then
+                waypoints[#waypoints + 1] = {x = cx, y = cy, z = cz or startPos.z}
+                logPathDebug(string.format("No portal found, using poly center: (%.2f, %.2f)", cx, cy))
+            end
+            i = k + 1
+        else
+            -- Find optimal steering point on the portal
+            local steerPt = steerPointOnPortal(curr, endPos, portalA, portalB, 0.5)
+
+            -- Estimate Z by interpolation
+            local dx = endPos.x - curr.x
+            local dy = endPos.y - curr.y
+            local lenSq = dx * dx + dy * dy + 1e-6
+            local t = ((steerPt.x - curr.x) * dx + (steerPt.y - curr.y) * dy) / lenSq
+            t = math.max(0, math.min(1, t))
+            local z = curr.z + (endPos.z - curr.z) * t
+
+            waypoints[#waypoints + 1] = {x = steerPt.x, y = steerPt.y, z = z}
+
+            logPathDebug(string.format("Portal k=%d: A=(%.2f,%.2f) B=(%.2f,%.2f)", k, portalA.x, portalA.y, portalB.x, portalB.y))
+            logPathDebug(string.format("Steer point: (%.2f, %.2f, %.2f)", steerPt.x, steerPt.y, z))
+
+            i = k + 1
+        end
+    end
+
+    -- Ensure we end at endPos
+    local lastWp = waypoints[#waypoints]
+    if math.abs(lastWp.x - endPos.x) > 0.1 or math.abs(lastWp.y - endPos.y) > 0.1 then
+        waypoints[#waypoints + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
+        logPathDebug("Added final endpoint")
+    end
+
+    logPathDebug(string.format("\n=== FINAL PATH: %d waypoints ===", #waypoints))
+    for wi, wp in ipairs(waypoints) do
+        logPathDebug(string.format("WP[%d]: (%.2f, %.2f, %.2f)", wi, wp.x, wp.y, wp.z))
+    end
+
+    return waypoints
+end
+
+-- Safe distance: find distance to nearest boundary edge and push waypoint away
+local SAFE_DISTANCE = 5.0  -- yards - keep waypoints this far from walls/cliffs
+
+local function findDistanceToWall(world, tileId, poly, px, py)
+    local tile = world.tilesById[tileId]
+    if not tile then return math.huge, 0, 0 end
+
+    local base = (poly - 1) * 6
+    local nv = tile.pVertCount[poly]
+
+    local minDist = math.huge
+    local wallNx, wallNy = 0, 0
+
+    for i = 1, nv do
+        local nei = tile.pNeis[base + i]
+
+        -- Check if this is a boundary edge (no neighbor or external)
+        local isBoundary = (nei == 0) or (nei >= 0x8000 and not tile.extToTile[base + i])
+
+        if isBoundary then
+            local vi = tile.pVerts[base + i]
+            local vj = tile.pVerts[base + (i % nv) + 1]
+            local ax, ay = tile.vx[vi], tile.vy[vi]
+            local bx, by = tile.vx[vj], tile.vy[vj]
+
+            -- Find closest point on edge
+            local cx, cy, distSq = closest_pt_seg2d(px, py, ax, ay, bx, by)
+            local dist = math.sqrt(distSq)
+
+            if dist < minDist then
+                minDist = dist
+                -- Normal pointing inward (perpendicular to edge, towards poly interior)
+                local ex, ey = bx - ax, by - ay
+                local len = math.sqrt(ex * ex + ey * ey)
+                if len > 0 then
+                    -- Rotate 90 degrees CCW for inward normal (assuming CCW winding)
+                    wallNx, wallNy = -ey / len, ex / len
+                end
+            end
+        end
+    end
+
+    return minDist, wallNx, wallNy
+end
+
+-- Simple safe distance: just push away from the nearest boundary edge
+local function applySafeDistance(waypoints, polyPath, world)
+    local MIN_DIST = 3.0  -- Minimum distance from walls
+
+    for idx = 2, #waypoints - 1 do  -- Skip start and end
+        local wp = waypoints[idx]
+        local nearestDist = math.huge
+        local nearestPushX, nearestPushY = 0, 0
+
+        -- Find the single nearest boundary edge
+        for i = 1, #polyPath do
+            local tileId, poly = decode_node(polyPath[i])
+            local tile = world.tilesById[tileId]
+            if not tile then goto continue_poly end
+
+            local base = (poly - 1) * 6
+            local nv = tile.pVertCount[poly]
+
+            for e = 1, nv do
+                local nei = tile.pNeis[base + e]
+
+                if nei == 0 then  -- Boundary edge
+                    local vi = tile.pVerts[base + e]
+                    local vj = tile.pVerts[base + (e % nv) + 1]
+                    local ax, ay = tile.vx[vi], tile.vy[vi]
+                    local bx, by = tile.vx[vj], tile.vy[vj]
+
+                    local cx, cy, distSq = closest_pt_seg2d(wp.x, wp.y, ax, ay, bx, by)
+                    local dist = math.sqrt(distSq)
+
+                    if dist < nearestDist and dist > 0.1 then
+                        nearestDist = dist
+                        nearestPushX = (wp.x - cx) / dist
+                        nearestPushY = (wp.y - cy) / dist
+                    end
+                end
+            end
+            ::continue_poly::
+        end
+
+        -- Only push if too close to nearest boundary
+        if nearestDist < MIN_DIST then
+            local pushAmount = MIN_DIST - nearestDist
+            wp.x = wp.x + nearestPushX * pushAmount
+            wp.y = wp.y + nearestPushY * pushAmount
+        end
+    end
+
+    return waypoints
+end
+
+-- =========================
 -- Funnel Algorithm
 -- =========================
+
+-- Path mode options:
+-- "visibility" = Greedy visibility-based straightening (recommended)
+-- "funnel" = Traditional funnel algorithm
+-- "portal" = Portal midpoints (most waypoints, guaranteed safe)
+local PATH_MODE = "visibility"
 
 -- startPos: {x, y, z}
 -- endPos: {x, y, z}
@@ -583,6 +1178,53 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
     local tb, pb = decode_node(polyPath[#polyPath])
     local sx, sy = self:clamp_to_poly(ta, pa, startPos.x, startPos.y)
     local ex, ey = self:clamp_to_poly(tb, pb, endPos.x, endPos.y)
+
+    -- VISIBILITY MODE: Greedy "look ahead as far as possible" with safe distance
+    if PATH_MODE == "visibility" then
+        local clampedStart = {x = sx, y = sy, z = startPos.z}
+        local clampedEnd = {x = ex, y = ey, z = endPos.z}
+
+        -- Generate path using visibility-based straightening
+        local out = straightenPathGreedy(polyPath, clampedStart, clampedEnd, world)
+
+        -- Apply safe distance from walls
+        out = applySafeDistance(out, polyPath, world)
+
+        return out
+    end
+
+    -- PORTAL MODE: Use portal midpoints (fallback, most waypoints)
+    if PATH_MODE == "portal" then
+        local out = {}
+
+        -- Start waypoint
+        out[1] = {x = startPos.x, y = startPos.y, z = startPos.z}
+
+        -- Add portal midpoints for each polygon transition
+        for i = 1, #polyPath - 1 do
+            local tA, pA = decode_node(polyPath[i])
+            local tB, pB = decode_node(polyPath[i + 1])
+
+            local x0, y0, x1, y1 = self:get_transition_edge(tA, pA, tB, pB)
+            if x0 then
+                local midX, midY = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+
+                -- Sample height at portal midpoint
+                local tileB = world.tilesById[tB]
+                local midZ = startPos.z  -- Fallback
+                if tileB then
+                    midZ = tileB.pCz[pB] or startPos.z
+                end
+
+                out[#out + 1] = {x = midX, y = midY, z = midZ}
+            end
+        end
+
+        -- End waypoint
+        out[#out + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
+
+        return out
+    end
 
     -- Build portals using adjacency edge data (FIX #2a)
     local portals = {}
