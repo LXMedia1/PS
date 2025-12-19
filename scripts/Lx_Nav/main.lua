@@ -1663,6 +1663,10 @@ local function find_path_to(targetX, targetY, targetZ)
     else
         Debug.log_error(string.format("[Path] FAILED: %s (expansions: %d)",
             result.error or "unknown", result.expansions or 0))
+        -- Clear stale path visual to avoid showing invalid route
+        PathState.path = nil
+        PathState.polyPath = nil
+        PathState.targetPos = nil
         return false
     end
 end

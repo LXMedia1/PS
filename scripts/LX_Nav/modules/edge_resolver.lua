@@ -1,26 +1,35 @@
 -- Cross-Tile Edge Resolver
 -- Uses edge hashing for O(n) resolution instead of O(n²) brute-force
 -- Epsilon-based quantization handles floating-point differences at tile boundaries
+--
+-- IMPORTANT: Includes Z validation to prevent false links between different floors
+-- (ground ↔ roof connections were causing paths to "teleport" between vertical levels)
+--
+-- NOTE: Layer field now available in tiles for future multi-level support
 
 local EdgeResolver = {}
 
 -- Epsilon for vertex matching (from test_cross_tile_connections results)
--- eps=0.30 gives 98.7% match rate
-local EPSILON = 0.30
-local INV_EPS = 1.0 / EPSILON
+-- eps=0.30 gives 98.7% match rate for XY
+local EPSILON_XY = 0.30
+local INV_EPS_XY = 1.0 / EPSILON_XY
+
+-- Maximum vertical difference allowed for edge connections
+-- Uses tile's walkableClimb when available, otherwise this default
+local DEFAULT_MAX_CLIMB = 2.0
 
 -- Quantize a coordinate to epsilon grid
-local function quantize(v)
-    return math.floor(v * INV_EPS + 0.5)
+local function quantize_xy(v)
+    return math.floor(v * INV_EPS_XY + 0.5)
 end
 
--- Create canonical edge key from two 2D endpoints
+-- Create canonical edge key from two 2D endpoints (XY only for hashing)
 -- Key is sorted so that AB == BA
-local function edge_key(ax, ay, bx, by)
-    local axq = quantize(ax)
-    local ayq = quantize(ay)
-    local bxq = quantize(bx)
-    local byq = quantize(by)
+local function edge_key_xy(ax, ay, bx, by)
+    local axq = quantize_xy(ax)
+    local ayq = quantize_xy(ay)
+    local bxq = quantize_xy(bx)
+    local byq = quantize_xy(by)
 
     -- Canonical order: smaller point first
     if axq > bxq or (axq == bxq and ayq > byq) then
@@ -31,8 +40,21 @@ local function edge_key(ax, ay, bx, by)
     return axq .. "," .. ayq .. "|" .. bxq .. "," .. byq
 end
 
+-- Check if two edge Z values are compatible (within MAX_CLIMB)
+-- Handles both same-order and reversed-order endpoint matching
+local function edge_z_compatible(az1, bz1, az2, bz2, maxClimb)
+    -- Compare corresponding endpoints; allow reversed ordering
+    -- d1: A1↔A2, B1↔B2 (same order)
+    -- d2: A1↔B2, B1↔A2 (reversed order)
+    local d1 = math.abs(az1 - az2) + math.abs(bz1 - bz2)
+    local d2 = math.abs(az1 - bz2) + math.abs(bz1 - az2)
+    local avgDiff = math.min(d1, d2) * 0.5
+    return avgDiff <= maxClimb, avgDiff
+end
+
 -- Build edge map for a tile's external edges
--- Returns: map[key] = {tileId, poly, edge, dir}
+-- Returns: map[key] = list of {tileId, poly, edge, dir, z1, z2}
+-- Note: Multiple edges can have same XY key but different Z (multi-level)
 function EdgeResolver.build_edge_map(soa)
     local map = {}
     local count = 0
@@ -52,21 +74,29 @@ function EdgeResolver.build_edge_map(soa)
                 local v2 = soa.pVerts[base + nextEdge]
 
                 if v1 > 0 and v2 > 0 then
-                    -- Use XY for key (Z is height, less reliable for matching)
-                    local key = edge_key(
+                    -- Use XY for key (Z is validated separately)
+                    local key = edge_key_xy(
                         soa.vx[v1], soa.vy[v1],
                         soa.vx[v2], soa.vy[v2]
                     )
 
-                    map[key] = {
+                    local edgeInfo = {
                         tileId = soa.tileId,
                         poly = p,
                         edge = e,
                         dir = nei - 0x8000,  -- Direction code (0,2,4,6)
-                        -- Store Z for validation
+                        -- Store Z for validation (CRITICAL for multi-level)
                         z1 = soa.vz[v1],
                         z2 = soa.vz[v2],
+                        x1 = soa.vx[v1], y1 = soa.vy[v1],  -- Store XY for debug
+                        x2 = soa.vx[v2], y2 = soa.vy[v2],
                     }
+
+                    -- Use list instead of single entry (multi-level: same XY, diff Z)
+                    if not map[key] then
+                        map[key] = {}
+                    end
+                    map[key][#map[key] + 1] = edgeInfo
                     count = count + 1
                 end
             end
@@ -79,55 +109,73 @@ end
 -- Resolve cross-tile edges between two adjacent SoA tiles
 -- Mutates soaA and soaB by filling extToTile/extToPoly/extToEdge
 -- Returns: number of resolved edges
+-- IMPORTANT: Now validates Z to prevent ground↔roof false links
+-- Uses tile's walkableClimb when available
 function EdgeResolver.resolve(soaA, soaB)
     local Debug = require("modules/debug")
     local mapA, countA = EdgeResolver.build_edge_map(soaA)
     local mapB, countB = EdgeResolver.build_edge_map(soaB)
 
-    Debug.log(string.format("[EdgeResolver] Tile A(%d,%d) has %d external edges, Tile B(%d,%d) has %d external edges",
-        soaA.tileX, soaA.tileY, countA, soaB.tileX, soaB.tileY, countB))
+    -- Use minimum walkableClimb from both tiles (or default)
+    local maxClimb = math.min(
+        soaA.walkableClimb or DEFAULT_MAX_CLIMB,
+        soaB.walkableClimb or DEFAULT_MAX_CLIMB
+    )
 
     local resolved = 0
+    local rejectedZ = 0  -- Count of rejected due to Z difference
 
-    -- Match edges from A to B
-    for key, infoA in pairs(mapA) do
-        local infoB = mapB[key]
+    -- Match edges from A to B (now with Z validation)
+    for key, listA in pairs(mapA) do
+        local listB = mapB[key]
 
-        if infoB then
-            -- Found matching edge - link both directions
-            local baseA = (infoA.poly - 1) * 6 + infoA.edge
-            local baseB = (infoB.poly - 1) * 6 + infoB.edge
+        if listB then
+            -- Found XY match - now validate Z for each pair
+            for _, infoA in ipairs(listA) do
+                local bestB = nil
+                local bestZDiff = math.huge
 
-            -- A -> B
-            soaA.extToTile[baseA] = soaB.tileId
-            soaA.extToPoly[baseA] = infoB.poly
-            soaA.extToEdge[baseA] = infoB.edge
+                -- Find best Z-compatible match from B
+                for _, infoB in ipairs(listB) do
+                    local compatible, avgDiff = edge_z_compatible(
+                        infoA.z1, infoA.z2,
+                        infoB.z1, infoB.z2,
+                        maxClimb
+                    )
 
-            -- B -> A
-            soaB.extToTile[baseB] = soaA.tileId
-            soaB.extToPoly[baseB] = infoA.poly
-            soaB.extToEdge[baseB] = infoA.edge
+                    if compatible and avgDiff < bestZDiff then
+                        bestB = infoB
+                        bestZDiff = avgDiff
+                    end
+                end
 
-            resolved = resolved + 1
+                if bestB then
+                    -- Valid Z-compatible match found
+                    local baseA = (infoA.poly - 1) * 6 + infoA.edge
+                    local baseB = (bestB.poly - 1) * 6 + bestB.edge
+
+                    -- A -> B
+                    soaA.extToTile[baseA] = soaB.tileId
+                    soaA.extToPoly[baseA] = bestB.poly
+                    soaA.extToEdge[baseA] = bestB.edge
+
+                    -- B -> A
+                    soaB.extToTile[baseB] = soaA.tileId
+                    soaB.extToPoly[baseB] = infoA.poly
+                    soaB.extToEdge[baseB] = infoA.edge
+
+                    resolved = resolved + 1
+                else
+                    -- XY matched but Z rejected (multi-level case!)
+                    rejectedZ = rejectedZ + 1
+                end
+            end
         end
     end
 
-    -- Log some unmatched keys for debugging
-    if resolved == 0 and countA > 0 and countB > 0 then
-        local samplesA = {}
-        local samplesB = {}
-        local n = 0
-        for key, _ in pairs(mapA) do
-            n = n + 1
-            if n <= 3 then samplesA[n] = key end
-        end
-        n = 0
-        for key, _ in pairs(mapB) do
-            n = n + 1
-            if n <= 3 then samplesB[n] = key end
-        end
-        Debug.log(string.format("[EdgeResolver] No matches! Sample A keys: %s", table.concat(samplesA, "; ")))
-        Debug.log(string.format("[EdgeResolver] No matches! Sample B keys: %s", table.concat(samplesB, "; ")))
+    if rejectedZ > 0 then
+        Debug.log(string.format("[EdgeResolver] Rejected %d edges due to Z difference > %.1f (multi-level protection)",
+            rejectedZ, maxClimb))
     end
 
     return resolved
@@ -164,15 +212,25 @@ function EdgeResolver.resolve_all(tiles)
     return total
 end
 
--- Get epsilon value (for debugging/testing)
-function EdgeResolver.get_epsilon()
-    return EPSILON
+-- Get epsilon XY value (for debugging/testing)
+function EdgeResolver.get_epsilon_xy()
+    return EPSILON_XY
 end
 
--- Set epsilon value (for testing different thresholds)
-function EdgeResolver.set_epsilon(eps)
-    EPSILON = eps
-    INV_EPS = 1.0 / eps
+-- Set epsilon XY value (for testing different thresholds)
+function EdgeResolver.set_epsilon_xy(eps)
+    EPSILON_XY = eps
+    INV_EPS_XY = 1.0 / eps
+end
+
+-- Get max climb threshold
+function EdgeResolver.get_max_climb()
+    return DEFAULT_MAX_CLIMB
+end
+
+-- Set max climb threshold (for testing different values)
+function EdgeResolver.set_max_climb(climb)
+    DEFAULT_MAX_CLIMB = climb
 end
 
 return EdgeResolver

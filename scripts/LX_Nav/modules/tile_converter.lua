@@ -41,6 +41,8 @@ function TileConverter.convert(tile, mapId)
         mapId = mapId,
         tileX = tile.tileX,
         tileY = tile.tileY,
+        layer = tile.layer or 0,  -- For multi-level (ground vs roof at same X,Y)
+        walkableClimb = tile.walkableClimb or 0.6,  -- Max step height for edge validation
         tileId = TileConverter.tile_id(mapId, tile.tileX, tile.tileY),
         polyCount = polyCount,
         vertCount = vertCount,
@@ -153,7 +155,30 @@ function TileConverter.convert(tile, mapId)
         end
     end
 
+    -- Index off-mesh connections for O(1) lookup by polygon
+    TileConverter.index_offmesh(soa)
+
     return soa
+end
+
+-- Build off-mesh connection lookup table (poly -> connection index)
+-- Enables fast detection of jump/teleport polygons during pathfinding
+function TileConverter.index_offmesh(soa)
+    soa.offMeshByPoly = {}
+    if soa.offMeshConnections then
+        for i = 1, #soa.offMeshConnections do
+            local c = soa.offMeshConnections[i]
+            -- dtOffMeshConnection.poly is the polygon index that represents this connection
+            -- In Detour, off-mesh connections become special polygons
+            local poly = c.poly
+            if poly and poly > 0 then
+                -- Convert from 0-based to 1-based if needed
+                if poly >= 1 and poly <= soa.polyCount then
+                    soa.offMeshByPoly[poly] = i
+                end
+            end
+        end
+    end
 end
 
 -- Get the edge vertices for a polygon edge (returns world coords)
@@ -223,6 +248,42 @@ function TileConverter.count_resolved_edges(soa)
         end
     end
     return count
+end
+
+-- Build index of external edges per side for slab overlap resolution
+-- Called after convert(), stores edges by direction for fast neighbor lookup
+-- side = nei % 256 (0=N, 2=E, 4=S, 6=W from neis[] high bits)
+local DT_EXT_LINK = 0x8000
+
+function TileConverter.build_ext_edge_index(soa)
+    soa.extEdges = {}  -- [side] = array of {poly, edge, ax,ay,az, bx,by,bz}
+
+    for side = 0, 7 do
+        soa.extEdges[side] = {}
+    end
+
+    for p = 1, soa.polyCount do
+        local nv = soa.pVertCount[p]
+        local base = (p - 1) * 6
+
+        for e = 1, nv do
+            local nei = soa.pNeis[base + e]
+            if nei >= DT_EXT_LINK then
+                local side = nei % 256  -- Low byte is direction
+                local i0 = soa.pVerts[base + e]
+                local i1 = soa.pVerts[base + (e % nv) + 1]
+
+                if i0 > 0 and i1 > 0 then
+                    soa.extEdges[side][#soa.extEdges[side] + 1] = {
+                        poly = p,
+                        edge = e,
+                        ax = soa.vx[i0], ay = soa.vy[i0], az = soa.vz[i0],
+                        bx = soa.vx[i1], by = soa.vy[i1], bz = soa.vz[i1]
+                    }
+                end
+            end
+        end
+    end
 end
 
 return TileConverter

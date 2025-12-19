@@ -188,6 +188,22 @@ function TileManager:get_all_tiles(map_id)
     return tiles
 end
 
+--- Get all tiles at a specific tile position (handles multi-layer)
+-- Used by edge resolver to find tiles on neighbor positions
+-- @param map_id Map ID
+-- @param x Tile X coordinate
+-- @param y Tile Y coordinate
+-- @return array of tiles at that position (may have multiple layers)
+function TileManager:get_tiles_at(map_id, x, y)
+    local result = {}
+    for key, tile in pairs(self.cached) do
+        if tile and tile.mapId == map_id and tile.tileX == x and tile.tileY == y then
+            result[#result + 1] = tile
+        end
+    end
+    return result
+end
+
 --- Pick the highest priority task from the queue
 local function pick_best_task(queue)
     if #queue == 0 then

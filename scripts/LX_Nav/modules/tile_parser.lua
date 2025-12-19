@@ -425,9 +425,11 @@ function TileParser.parse(data)
         tile.offMeshConnections, pos = parse_off_mesh_connections(data, offMeshStart, tile.meshHeader.offMeshConCount)
     end
 
-    -- Store tile coordinates
+    -- Store tile coordinates and navigation parameters
     tile.tileX = tile.meshHeader.x
     tile.tileY = tile.meshHeader.y
+    tile.layer = tile.meshHeader.layer  -- For multi-level (ground vs roof)
+    tile.walkableClimb = tile.meshHeader.walkableClimb  -- Max step height
 
     -- Calculate bounds in WoW coords
     -- Conversion: wowX = recastZ, wowY = recastX, wowZ = recastY
@@ -548,9 +550,11 @@ function TileParser.parse_incremental(data, budget)
         tile.offMeshConnections, pos = parse_off_mesh_connections(data, offMeshStart, tile.meshHeader.offMeshConCount)
     end
 
-    -- Store tile coordinates
+    -- Store tile coordinates and navigation parameters
     tile.tileX = tile.meshHeader.x
     tile.tileY = tile.meshHeader.y
+    tile.layer = tile.meshHeader.layer  -- For multi-level (ground vs roof)
+    tile.walkableClimb = tile.meshHeader.walkableClimb  -- Max step height
 
     -- Calculate bounds in WoW coords
     local bmin = tile.meshHeader.bmin

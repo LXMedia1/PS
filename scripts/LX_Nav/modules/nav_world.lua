@@ -223,4 +223,36 @@ function NavWorld:clear()
     self.pendingConvert = {}
 end
 
+-- Get all tiles at a specific tile position (handles multi-layer)
+-- Used by edge resolver to find neighbor tiles
+-- @param mapId Map ID
+-- @param x Tile X coordinate
+-- @param y Tile Y coordinate
+-- @return array of SoA tiles at that position
+function NavWorld:get_tiles_at(mapId, x, y)
+    local result = {}
+    for tileId, soa in pairs(self.tilesById) do
+        if soa and soa.mapId == mapId and soa.tileX == x and soa.tileY == y then
+            result[#result + 1] = soa
+        end
+    end
+    return result
+end
+
+-- Get height at a position within a specific polygon (for edge resolution)
+-- Uses polygon center Z as simple fallback (could enhance with detail mesh sampling)
+-- @param soa SoA tile
+-- @param poly Polygon index (1-based)
+-- @param x World X coordinate
+-- @param y World Y coordinate
+-- @return Height value or nil
+function NavWorld:get_height_at(soa, poly, x, y)
+    if not soa or not poly or poly < 1 or poly > soa.polyCount then
+        return nil
+    end
+    -- Return polygon center Z as simple height approximation
+    -- For more accurate results, would sample detail mesh triangles
+    return soa.pCz[poly]
+end
+
 return NavWorld
