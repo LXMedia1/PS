@@ -2,7 +2,7 @@
 -- Manages SoA tiles, provides tile lookup, integrates with TileManager
 
 local TileConverter = require("modules/tile_converter")
-local EdgeResolver = require("modules/edge_resolver")
+local LinkResolver = require("modules/link_resolver")
 
 local NavWorld = {}
 NavWorld.__index = NavWorld
@@ -129,57 +129,46 @@ function NavWorld:sync_with_tile_manager(tileManager, mapId)
     return added
 end
 
--- Resolve cross-tile edges for pending tiles
+-- Resolve cross-tile links for all tiles (when new tiles added)
 function NavWorld:resolve_pending_edges()
     local Debug = require("modules/debug")
-    local pending = {}
-    for tileId, _ in pairs(self.pendingConvert) do
-        pending[#pending + 1] = tileId
+    local pendingCount = 0
+    for _ in pairs(self.pendingConvert) do
+        pendingCount = pendingCount + 1
     end
 
-    if #pending == 0 then return 0 end
+    if pendingCount == 0 then return 0 end
 
-    Debug.log(string.format("[EdgeResolve] Processing %d pending tiles, %d total tiles",
-        #pending, self:get_tile_count()))
+    Debug.log(string.format("[LinkResolve] Processing %d pending tiles, %d total tiles",
+        pendingCount, self:get_tile_count()))
 
-    -- Resolve all pairs of pending + existing tiles
-    local resolved = 0
-    local pairs_checked = 0
-    local pairs_adjacent = 0
+    -- Create neighbor lookup function
+    local function get_neighbor(mapId, tileX, tileY)
+        local tileId = TileConverter.tile_id(mapId, tileX, tileY)
+        return self.tilesById[tileId]
+    end
 
-    for _, tileIdA in ipairs(pending) do
-        local soaA = self.tilesById[tileIdA]
-        if soaA then
-            for tileIdB, soaB in pairs(self.tilesById) do
-                if tileIdA ~= tileIdB then
-                    pairs_checked = pairs_checked + 1
-                    -- Check if adjacent
-                    local dx = math.abs(soaA.tileX - soaB.tileX)
-                    local dy = math.abs(soaA.tileY - soaB.tileY)
+    -- Resolve ALL tiles (not just pending) since new tiles may connect to existing ones
+    local totalResolved = 0
+    local totalFailed = 0
+    local totalNoNeighbor = 0
 
-                    if (dx == 1 and dy == 0) or (dx == 0 and dy == 1) then
-                        pairs_adjacent = pairs_adjacent + 1
-                        local r = EdgeResolver.resolve(soaA, soaB)
-                        if r > 0 then
-                            Debug.log(string.format("[EdgeResolve] Tile (%d,%d) <-> (%d,%d): %d edges",
-                                soaA.tileX, soaA.tileY, soaB.tileX, soaB.tileY, r))
-                        end
-                        resolved = resolved + r
-                    end
-                end
-            end
-        else
-            Debug.log(string.format("[EdgeResolve] WARNING: soaA is nil for tileId %d", tileIdA))
+    for tileId, soa in pairs(self.tilesById) do
+        if soa then
+            local resolved, failed, noNeighbor = LinkResolver.resolve_tile(soa, get_neighbor)
+            totalResolved = totalResolved + resolved
+            totalFailed = totalFailed + failed
+            totalNoNeighbor = totalNoNeighbor + noNeighbor
         end
     end
 
-    Debug.log(string.format("[EdgeResolve] Checked %d pairs, %d adjacent, %d edges resolved",
-        pairs_checked, pairs_adjacent, resolved))
+    Debug.log(string.format("[LinkResolve] Total: %d resolved, %d failed, %d no neighbor",
+        totalResolved, totalFailed, totalNoNeighbor))
 
     -- Clear pending
     self.pendingConvert = {}
 
-    return resolved
+    return totalResolved
 end
 
 -- Get all loaded tiles
@@ -201,11 +190,13 @@ function NavWorld:get_stats()
     local totalPolys = 0
     local totalVerts = 0
     local totalResolved = 0
+    local totalLinks = 0
 
     for _, soa in pairs(self.tilesById) do
         totalPolys = totalPolys + soa.polyCount
         totalVerts = totalVerts + soa.vertCount
         totalResolved = totalResolved + TileConverter.count_resolved_edges(soa)
+        totalLinks = totalLinks + (soa.linkCount or 0)
     end
 
     return {
@@ -213,6 +204,7 @@ function NavWorld:get_stats()
         polys = totalPolys,
         verts = totalVerts,
         resolvedEdges = totalResolved,
+        totalLinks = totalLinks,
     }
 end
 

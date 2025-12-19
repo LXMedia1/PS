@@ -1,6 +1,6 @@
 local NavConstants = {}
 
--- Polygon Flags (verify these match your specific server/core)
+-- Polygon Flags (verify against core generation settings)
 NavConstants.Flags = {
     WALK       = 0x01, -- Standard ground
     SWIM       = 0x02, -- Water/Slime

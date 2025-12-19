@@ -195,17 +195,63 @@ end
 -- Step Cost Function
 -- =========================
 
-local function step_cost(tileA, polyA, tileB, polyB)
-    -- Base cost: 2D distance between polygon centers
-    local c = dist2D(tileA.pCx[polyA], tileA.pCy[polyA],
-                     tileB.pCx[polyB], tileB.pCy[polyB])
+local NavConstants = require("modules/nav_constants")
 
-    -- Area type penalties (customize as needed)
-    local areaB = tileB.pArea[polyB]
-    if areaB == 2 then  -- Water
-        c = c * 1.5
-    elseif areaB == 3 then  -- Magma/Slime
-        c = c * 10
+-- Slope threshold for climbing (must match wireframe.lua)
+local MAX_WALKABLE_SLOPE = 0.9
+
+local function step_cost(tileA, polyA, tileB, polyB)
+    -- Get polygon centers
+    local ax, ay, az = tileA.pCx[polyA], tileA.pCy[polyA], tileA.pCz[polyA]
+    local bx, by, bz = tileB.pCx[polyB], tileB.pCy[polyB], tileB.pCz[polyB]
+
+    -- Calculate 2D distance
+    local dx, dy = bx - ax, by - ay
+    local xyDist = math.sqrt(dx * dx + dy * dy)
+
+    -- Calculate slope (height change per XY distance)
+    if xyDist > 0.1 then
+        local heightDiff = bz - az  -- Positive = going UP
+        local slope = heightDiff / xyDist
+
+        -- If slope is too steep going UP, block this path
+        if slope > MAX_WALKABLE_SLOPE then
+            return 1e30  -- Can't climb this steep
+        end
+        -- Going DOWN steep slopes is OK (gravity helps)
+    end
+
+    -- Base cost: 2D distance
+    local c = xyDist
+
+    -- Check polygon flags for walkability
+    local flags = tileB.pFlags[polyB] or 0
+    if bit and bit.band then
+        -- Unwalkable = infinite cost (skip this poly)
+        if bit.band(flags, NavConstants.Flags.UNWALKABLE) ~= 0 then
+            return 1e30
+        end
+        -- Swimming costs more
+        if bit.band(flags, NavConstants.Flags.SWIM) ~= 0 then
+            c = c * 1.5
+        end
+    else
+        -- Fallback without bit library (check if UNWALKABLE bit is set)
+        local flagCopy = flags
+        local unwalkable = math.floor(flagCopy / NavConstants.Flags.UNWALKABLE) % 2
+        if unwalkable == 1 then
+            return 1e30
+        end
+    end
+
+    -- Area type cost modifiers
+    local area = tileB.pArea[polyB] or 0
+    if area == NavConstants.Area.ROAD then
+        c = c * 0.9  -- Prefer roads
+    elseif area == NavConstants.Area.WATER then
+        c = c * 1.5  -- Water is slower
+    elseif area == NavConstants.Area.DANGER then
+        c = c * 20.0  -- Avoid dangerous areas
     end
 
     return c

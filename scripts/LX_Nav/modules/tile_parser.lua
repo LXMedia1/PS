@@ -4,6 +4,7 @@
 -- Supports yieldable incremental parsing with budget:step()
 
 local Binary = require("modules/binary")
+local NavConstants = require("modules/nav_constants")
 
 local TileParser = {}
 
@@ -134,12 +135,26 @@ local function parse_polygons(data, pos, count, vertices)
         end
 
         poly.flags = Binary.read_u16(data, pos); pos = pos + 2
+        
+        -- Decode booleans from flags
+        if bit and bit.band then
+            poly.isWalkable = bit.band(poly.flags, NavConstants.Flags.WALK) ~= 0
+            poly.isSwimmable = bit.band(poly.flags, NavConstants.Flags.SWIM) ~= 0
+        else
+            -- Fallback if bit library is missing (unlikely in WoW Lua)
+            poly.isWalkable = (poly.flags % 2) == 1
+            poly.isSwimmable = false -- Cannot easily detect without bitwise
+        end
+
         poly.vertCount = Binary.read_u8(data, pos); pos = pos + 1
         poly.areaAndtype = Binary.read_u8(data, pos); pos = pos + 1
 
         -- Extract area and type
         poly.area = poly.areaAndtype % 64  -- & 0x3f
         poly.polyType = math.floor(poly.areaAndtype / 64)  -- >> 6
+        
+        -- Override area based on decoded flags if needed?
+        -- For now, keep as is.
 
         -- Get actual vertex positions for this polygon
         poly.worldVerts = {}
@@ -171,6 +186,27 @@ local function parse_polygons(data, pos, count, vertices)
         maybe_yield("polys", i, count)
     end
     return polygons, pos
+end
+
+--- Parse links (16 bytes each for 64-bit refs)
+-- Yields every check_every iterations when budget is active
+local function parse_links(data, pos, count)
+    local links = {}
+    for i = 1, count do
+        local link = {}
+        -- dtPolyRef (64-bit): split into two u32
+        -- Ref format: salt(12) + tile(21) + poly(31)
+        link.refLo = Binary.read_u32(data, pos); pos = pos + 4
+        link.refHi = Binary.read_u32(data, pos); pos = pos + 4
+        link.next = Binary.read_u32(data, pos); pos = pos + 4
+        link.edge = Binary.read_u8(data, pos); pos = pos + 1
+        link.side = Binary.read_u8(data, pos); pos = pos + 1
+        link.bmin = Binary.read_u8(data, pos); pos = pos + 1
+        link.bmax = Binary.read_u8(data, pos); pos = pos + 1
+        links[i] = link
+        maybe_yield("links", i, count)
+    end
+    return links, pos
 end
 
 -- Debug: log hex dump of bytes
@@ -307,6 +343,44 @@ local function parse_off_mesh_connections(data, pos, count)
     return connections, pos
 end
 
+--- Parse liquid data (appended to end of tile)
+-- Yields every check_every iterations when budget is active
+local function parse_liquid(data, pos)
+    -- Safety check: header is 36 bytes (9 * u32)
+    if pos + 36 > #data + 1 then return nil, pos end
+
+    local liquid = {}
+    liquid.version = Binary.read_u32(data, pos); pos = pos + 4
+    liquid.tileX = Binary.read_u32(data, pos); pos = pos + 4
+    liquid.tileY = Binary.read_u32(data, pos); pos = pos + 4
+    liquid.layer = Binary.read_u32(data, pos); pos = pos + 4
+    liquid.x = Binary.read_u32(data, pos); pos = pos + 4
+    liquid.y = Binary.read_u32(data, pos); pos = pos + 4
+    liquid.width = Binary.read_u32(data, pos); pos = pos + 4
+    liquid.height = Binary.read_u32(data, pos); pos = pos + 4
+    liquid.type = Binary.read_u32(data, pos); pos = pos + 4
+    
+    -- Parse Liquid Data (height map/flow)
+    -- TrinityCore format: count * 5 bytes (4 byte float + 1 byte flag)
+    local count = liquid.width * liquid.height
+    local dataSize = count * 5
+    
+    if pos + dataSize <= #data + 1 then
+        -- Read data into a simple table for now (skipping complex parsing)
+        -- We just need to advance position mostly, but storing raw data might be useful later.
+        -- For now, just skip to save memory/time as we only need the Type (water/slime) for cost.
+        pos = pos + dataSize
+        liquid.hasData = true
+    else
+        -- Warning: truncated data
+        pos = #data + 1
+        liquid.hasData = false
+    end
+
+    maybe_yield("liquid", 1, 1)
+    return liquid, pos
+end
+
 --- Parse full mmtile file
 -- @param data string Binary data
 -- @return table|nil tile Parsed tile data
@@ -336,7 +410,7 @@ function TileParser.parse(data)
     local vertStart = pos
     local vertEnd = vertStart + (tile.meshHeader.vertCount * 12) - 1
     local polyStart = vertEnd + 1
-    local polyEnd = polyStart + (tile.meshHeader.polyCount * DT_POLY_SIZE) - 1
+    -- local polyEnd = polyStart + (tile.meshHeader.polyCount * DT_POLY_SIZE) - 1
 
     -- Parse vertices
     tile.vertices, pos = parse_vertices(data, vertStart, tile.meshHeader.vertCount)
@@ -344,85 +418,46 @@ function TileParser.parse(data)
     -- Parse polygons
     tile.polygons, pos = parse_polygons(data, polyStart, tile.meshHeader.polyCount, tile.vertices)
 
-    -- CORRECT Detour tile-data layout (from research):
-    -- dtMeshHeader → verts[] → polys[] → links[] → detailMeshes[] → detailVerts[] → detailTris[] → bvTree[] → offMeshCons[]
-    -- Links ARE between polys and detailMeshes (NOT at end!)
-    -- TrinityCore uses 64-bit refs, so dtLink = 16 bytes (not 12)
-
-    -- Calculate links block size (with 4-byte alignment)
-    -- dtLink (64-bit): ref(8) + next(4) + edge(1) + side(1) + bmin(1) + bmax(1) = 16 bytes
-    local linksSize = tile.meshHeader.maxLinkCount * DT_LINK_SIZE
-    local linksStart = polyEnd + 1
-    local linksEnd = linksStart + linksSize - 1
-
-    -- Calculate detail mesh data offsets (AFTER links!)
-    local detailMeshStart = linksEnd + 1
-    local detailMeshEnd = detailMeshStart + (tile.meshHeader.detailMeshCount * DT_POLY_DETAIL_SIZE) - 1
-    local detailVertStart = detailMeshEnd + 1
-    local detailVertEnd = detailVertStart + (tile.meshHeader.detailVertCount * DT_DETAIL_VERT_SIZE) - 1
-    local detailTriStart = detailVertEnd + 1
-    local detailTriEnd = detailTriStart + (tile.meshHeader.detailTriCount * DT_DETAIL_TRI_SIZE) - 1
-
-    -- DEBUG: Log the calculated offsets to file (append mode)
-    local LOG = "parse_log_offsets.log"
-    if not offset_log_created then
-        core.create_log_file(LOG)
-        offset_log_created = true
-    end
-    core.write_log_file(LOG, string.format("\n=== Tile mesh(%d,%d) polys=%d ===\n",
-        tile.meshHeader.x, tile.meshHeader.y, tile.meshHeader.polyCount))
-    core.write_log_file(LOG, string.format("File size: %d bytes\n", #data))
-    core.write_log_file(LOG, string.format("Vertices: start=%d, count=%d, size=%d\n",
-        vertStart, tile.meshHeader.vertCount, tile.meshHeader.vertCount * 12))
-    core.write_log_file(LOG, string.format("Polygons: start=%d, end=%d, count=%d, size=%d\n",
-        polyStart, polyEnd, tile.meshHeader.polyCount, tile.meshHeader.polyCount * DT_POLY_SIZE))
-    core.write_log_file(LOG, string.format("Links: start=%d, end=%d, count=%d, size=%d (dtLink=16B for 64-bit)\n",
-        linksStart, linksEnd, tile.meshHeader.maxLinkCount, linksSize))
-    core.write_log_file(LOG, string.format("DetailMeshes: start=%d, count=%d, size=%d\n",
-        detailMeshStart, tile.meshHeader.detailMeshCount, tile.meshHeader.detailMeshCount * DT_POLY_DETAIL_SIZE))
-    core.write_log_file(LOG, string.format("DetailVerts: start=%d, count=%d, size=%d\n",
-        detailVertStart, tile.meshHeader.detailVertCount, tile.meshHeader.detailVertCount * DT_DETAIL_VERT_SIZE))
-    core.write_log_file(LOG, string.format("DetailTris: start=%d, end=%d, count=%d, size=%d\n",
-        detailTriStart, detailTriEnd, tile.meshHeader.detailTriCount, tile.meshHeader.detailTriCount * DT_DETAIL_TRI_SIZE))
-
-    -- Check if calculated end exceeds file size
-    if detailTriEnd > #data then
-        core.write_log_file(LOG, string.format("!!! ERROR: detailTriEnd=%d exceeds file size=%d!\n", detailTriEnd, #data))
+    -- Parse Links
+    tile.links = {}
+    if tile.meshHeader.maxLinkCount > 0 then
+        tile.links, pos = parse_links(data, pos, tile.meshHeader.maxLinkCount)
     end
 
     -- Parse detail meshes
     tile.detailMeshes = {}
-    tile.detailVerts = {}
-    tile.detailTris = {}
-
     if tile.meshHeader.detailMeshCount > 0 then
-        tile.detailMeshes, pos = parse_detail_meshes(data, detailMeshStart, tile.meshHeader.detailMeshCount)
+        tile.detailMeshes, pos = parse_detail_meshes(data, pos, tile.meshHeader.detailMeshCount)
     end
 
+    -- Parse detail verts
+    tile.detailVerts = {}
     if tile.meshHeader.detailVertCount > 0 then
-        tile.detailVerts, pos = parse_detail_vertices(data, detailVertStart, tile.meshHeader.detailVertCount)
+        tile.detailVerts, pos = parse_detail_vertices(data, pos, tile.meshHeader.detailVertCount)
     end
 
+    -- Parse detail tris
+    tile.detailTris = {}
     if tile.meshHeader.detailTriCount > 0 then
-        tile.detailTris, pos = parse_detail_triangles(data, detailTriStart, tile.meshHeader.detailTriCount)
+        tile.detailTris, pos = parse_detail_triangles(data, pos, tile.meshHeader.detailTriCount)
     end
-
-    -- Calculate BVNode and OffMesh offsets
-    local bvNodeStart = detailTriEnd + 1
-    local bvNodeEnd = bvNodeStart + (tile.meshHeader.bvNodeCount * DT_BV_NODE_SIZE) - 1
-    local offMeshStart = bvNodeEnd + 1
-    local offMeshEnd = offMeshStart + (tile.meshHeader.offMeshConCount * DT_OFF_MESH_CON_SIZE) - 1
 
     -- Parse BV nodes (for spatial queries)
     tile.bvNodes = {}
     if tile.meshHeader.bvNodeCount > 0 then
-        tile.bvNodes, pos = parse_bv_nodes(data, bvNodeStart, tile.meshHeader.bvNodeCount)
+        tile.bvNodes, pos = parse_bv_nodes(data, pos, tile.meshHeader.bvNodeCount)
     end
 
     -- Parse off-mesh connections (jump/teleport links) - CRITICAL for pathfinding!
     tile.offMeshConnections = {}
     if tile.meshHeader.offMeshConCount > 0 then
-        tile.offMeshConnections, pos = parse_off_mesh_connections(data, offMeshStart, tile.meshHeader.offMeshConCount)
+        tile.offMeshConnections, pos = parse_off_mesh_connections(data, pos, tile.meshHeader.offMeshConCount)
+    end
+    
+    -- Parse Liquid (At the very end)
+    tile.liquid = nil
+    if tile.mmapHeader.usesLiquids == 1 then
+        tile.liquid, pos = parse_liquid(data, pos)
     end
 
     -- Store tile coordinates and navigation parameters
@@ -493,7 +528,7 @@ function TileParser.parse_incremental(data, budget)
     local vertStart = pos
     local vertEnd = vertStart + (tile.meshHeader.vertCount * 12) - 1
     local polyStart = vertEnd + 1
-    local polyEnd = polyStart + (tile.meshHeader.polyCount * DT_POLY_SIZE) - 1
+    -- local polyEnd = polyStart + (tile.meshHeader.polyCount * DT_POLY_SIZE) - 1
 
     -- Parse vertices (YIELDS periodically)
     tile.vertices, pos = parse_vertices(data, vertStart, tile.meshHeader.vertCount)
@@ -501,53 +536,49 @@ function TileParser.parse_incremental(data, budget)
     -- Parse polygons (YIELDS periodically)
     tile.polygons, pos = parse_polygons(data, polyStart, tile.meshHeader.polyCount, tile.vertices)
 
-    -- Skip links block (garbage data, but must advance position)
-    -- dtLink (64-bit): ref(8) + next(4) + edge(1) + side(1) + bmin(1) + bmax(1) = 16 bytes
-    local linksSize = tile.meshHeader.maxLinkCount * DT_LINK_SIZE
-    local linksStart = polyEnd + 1
-    local linksEnd = linksStart + linksSize - 1
-    maybe_yield("links", 1, 1)
-
-    -- Calculate detail mesh data offsets (AFTER links!)
-    local detailMeshStart = linksEnd + 1
-    local detailMeshEnd = detailMeshStart + (tile.meshHeader.detailMeshCount * DT_POLY_DETAIL_SIZE) - 1
-    local detailVertStart = detailMeshEnd + 1
-    local detailVertEnd = detailVertStart + (tile.meshHeader.detailVertCount * DT_DETAIL_VERT_SIZE) - 1
-    local detailTriStart = detailVertEnd + 1
-    local detailTriEnd = detailTriStart + (tile.meshHeader.detailTriCount * DT_DETAIL_TRI_SIZE) - 1
+    -- Parse Links (YIELDS periodically)
+    -- NOTE: Links in mmtile are mostly internal (side=0xFF). External links (side<8)
+    -- exist in the array but aren't connected via pFirstLink chains - they are
+    -- placeholder entries that Detour would fill at runtime via connectExtLinks().
+    tile.links = {}
+    if tile.meshHeader.maxLinkCount > 0 then
+        tile.links, pos = parse_links(data, pos, tile.meshHeader.maxLinkCount)
+    end
 
     -- Parse detail meshes (YIELDS periodically)
     tile.detailMeshes = {}
-    tile.detailVerts = {}
-    tile.detailTris = {}
-
     if tile.meshHeader.detailMeshCount > 0 then
-        tile.detailMeshes, pos = parse_detail_meshes(data, detailMeshStart, tile.meshHeader.detailMeshCount)
+        tile.detailMeshes, pos = parse_detail_meshes(data, pos, tile.meshHeader.detailMeshCount)
     end
 
+    -- Parse detail verts
+    tile.detailVerts = {}
     if tile.meshHeader.detailVertCount > 0 then
-        tile.detailVerts, pos = parse_detail_vertices(data, detailVertStart, tile.meshHeader.detailVertCount)
+        tile.detailVerts, pos = parse_detail_vertices(data, pos, tile.meshHeader.detailVertCount)
     end
 
+    -- Parse detail tris
+    tile.detailTris = {}
     if tile.meshHeader.detailTriCount > 0 then
-        tile.detailTris, pos = parse_detail_triangles(data, detailTriStart, tile.meshHeader.detailTriCount)
+        tile.detailTris, pos = parse_detail_triangles(data, pos, tile.meshHeader.detailTriCount)
     end
-
-    -- Calculate BVNode and OffMesh offsets
-    local bvNodeStart = detailTriEnd + 1
-    local bvNodeEnd = bvNodeStart + (tile.meshHeader.bvNodeCount * DT_BV_NODE_SIZE) - 1
-    local offMeshStart = bvNodeEnd + 1
 
     -- Parse BV nodes (YIELDS periodically)
     tile.bvNodes = {}
     if tile.meshHeader.bvNodeCount > 0 then
-        tile.bvNodes, pos = parse_bv_nodes(data, bvNodeStart, tile.meshHeader.bvNodeCount)
+        tile.bvNodes, pos = parse_bv_nodes(data, pos, tile.meshHeader.bvNodeCount)
     end
 
     -- Parse off-mesh connections (YIELDS periodically, usually 0 in open terrain)
     tile.offMeshConnections = {}
     if tile.meshHeader.offMeshConCount > 0 then
-        tile.offMeshConnections, pos = parse_off_mesh_connections(data, offMeshStart, tile.meshHeader.offMeshConCount)
+        tile.offMeshConnections, pos = parse_off_mesh_connections(data, pos, tile.meshHeader.offMeshConCount)
+    end
+    
+    -- Parse Liquid (At the very end)
+    tile.liquid = nil
+    if tile.mmapHeader.usesLiquids == 1 then
+        tile.liquid, pos = parse_liquid(data, pos)
     end
 
     -- Store tile coordinates and navigation parameters

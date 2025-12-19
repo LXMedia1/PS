@@ -34,6 +34,15 @@ local CONFIG = {
     offmesh_color = color.new(255, 0, 255, 220),   -- Magenta for off-mesh connections
     offmesh_bidir_color = color.new(0, 255, 255, 220),  -- Cyan for bidirectional
     offmesh_thickness = 2.5,
+    draw_cross_tile = false,   -- Draw polygon connection arrows
+    link_walk_color = color.new(0, 255, 0, 200),   -- Green for walkable (same level)
+    link_drop_color = color.new(255, 255, 0, 200), -- Yellow for drop down
+    link_climb_color = color.new(255, 0, 0, 200),  -- Red for can't climb (too high)
+    link_thickness = 1.0,
+    arrow_length = 0.8,        -- Arrow shaft length
+    arrow_head_size = 0.25,    -- Arrowhead size
+    max_walkable_slope = 0.9,  -- Max slope ratio (Z/XY) for walkable (green) ~50 degrees
+    drop_slope = 0.9,          -- Slope ratio for drop down (yellow)
     draw_bvnodes = false,      -- Draw bounding volume tree (spatial query structure)
     bvnode_alpha = 40,         -- Transparency for BV boxes
     bvnode_max_depth = 8,      -- Max tree depth to visualize (0=all)
@@ -439,6 +448,201 @@ local function draw_offmesh_connections(tile, player_pos)
     return drawn
 end
 
+-- Draw a small arrow from edge midpoint pointing toward neighbor polygon
+-- Arrow follows terrain slope (Z interpolates from edge to neighbor)
+local function draw_arrow(x1, y1, z1, x2, y2, z2, neiCx, neiCy, neiCz, arrow_color, thickness)
+    local ho = CONFIG.height_offset
+
+    -- Edge midpoint (start of arrow)
+    local mx, my, mz = (x1 + x2) * 0.5, (y1 + y2) * 0.5, (z1 + z2) * 0.5
+
+    -- Direction from edge midpoint to neighbor polygon center (XY only for length calc)
+    local dirX = neiCx - mx
+    local dirY = neiCy - my
+    local dirLen = math.sqrt(dirX * dirX + dirY * dirY)
+
+    if dirLen < 0.1 then return end
+
+    -- Normalize XY direction
+    dirX = dirX / dirLen
+    dirY = dirY / dirLen
+
+    -- Arrow length and interpolation factor
+    local arrowLen = CONFIG.arrow_length
+    local t = arrowLen / dirLen  -- How far along the path (0 to 1)
+    if t > 1 then t = 1 end
+
+    -- Arrow end position - interpolate XY and Z (show true slope)
+    local endX = mx + dirX * arrowLen
+    local endY = my + dirY * arrowLen
+    local endZ = mz + (neiCz - mz) * t
+
+    -- Draw main arrow line
+    local p1 = vec3.new(mx, my, mz + ho)
+    local p2 = vec3.new(endX, endY, endZ + ho)
+    core.graphics.line_3d(p1, p2, arrow_color, thickness)
+
+    -- Draw arrowhead (two lines forming a V)
+    local headLen = CONFIG.arrow_head_size
+    local headAngle = 0.4
+
+    -- Perpendicular direction (in XY plane)
+    local perpX, perpY = -dirY, dirX
+
+    -- Calculate Z slope for arrowhead
+    local dz = (neiCz - mz) * t
+    local slopePerUnit = dz / arrowLen
+    local headDz = headLen * slopePerUnit
+
+    -- Left wing
+    local lwX = endX - dirX * headLen + perpX * headLen * headAngle
+    local lwY = endY - dirY * headLen + perpY * headLen * headAngle
+    local lwZ = endZ - headDz
+
+    -- Right wing
+    local rwX = endX - dirX * headLen - perpX * headLen * headAngle
+    local rwY = endY - dirY * headLen - perpY * headLen * headAngle
+    local rwZ = endZ - headDz
+
+    local pEnd = vec3.new(endX, endY, endZ + ho)
+    local pLW = vec3.new(lwX, lwY, lwZ + ho)
+    local pRW = vec3.new(rwX, rwY, rwZ + ho)
+
+    core.graphics.line_3d(pEnd, pLW, arrow_color, thickness)
+    core.graphics.line_3d(pEnd, pRW, arrow_color, thickness)
+end
+
+-- Draw ALL polygon connections (arrows showing direction to each neighbor)
+-- Green = walkable, Yellow = jump/off-mesh
+-- Takes SoA tiles from NavWorld (not raw parser tiles)
+local function draw_cross_tile_connections(soa_tiles, player_pos)
+    if not CONFIG.draw_cross_tile or not soa_tiles then
+        return 0
+    end
+
+    local drawn = 0
+    local range_sq = CONFIG.draw_range * CONFIG.draw_range
+    local DT_EXT_LINK = 0x8000
+
+    for tileId, soa in pairs(soa_tiles) do
+        if not soa.vx or not soa.pVerts or not soa.pNeis then
+            goto continue_tile
+        end
+
+        -- Check if this tile has off-mesh polygon lookup
+        local offMeshByPoly = soa.offMeshByPoly
+
+        for p = 1, soa.polyCount do
+            local nv = soa.pVertCount[p]
+            local vertBase = (p - 1) * 6
+            local neiBase = (p - 1) * 6
+
+            -- Check if current polygon is off-mesh endpoint
+            local isOffMeshPoly = offMeshByPoly and offMeshByPoly[p]
+
+            for e = 1, nv do
+                local nei = soa.pNeis[neiBase + e]
+                if not nei or nei == 0 then
+                    goto continue_edge  -- No neighbor (wall/boundary)
+                end
+
+                -- Get edge vertices
+                local v1 = soa.pVerts[vertBase + e]
+                local nextE = (e % nv) + 1
+                local v2 = soa.pVerts[vertBase + nextE]
+
+                if not v1 or v1 <= 0 or not v2 or v2 <= 0 then
+                    goto continue_edge
+                end
+
+                local x1, y1, z1 = soa.vx[v1], soa.vy[v1], soa.vz[v1]
+                local x2, y2, z2 = soa.vx[v2], soa.vy[v2], soa.vz[v2]
+
+                -- Check if edge midpoint is in range
+                local mx, my = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+                local dx = mx - player_pos.x
+                local dy = my - player_pos.y
+                local dist_sq = dx * dx + dy * dy
+
+                if dist_sq > range_sq then
+                    goto continue_edge
+                end
+
+                local neiCx, neiCy, neiCz
+                local neiPoly
+                local neiTile = soa  -- Default to same tile
+
+                if nei < DT_EXT_LINK then
+                    -- Internal neighbor (same tile)
+                    neiPoly = nei
+                    if neiPoly >= 1 and neiPoly <= soa.polyCount then
+                        neiCx = soa.pCx[neiPoly]
+                        neiCy = soa.pCy[neiPoly]
+                        neiCz = soa.pCz[neiPoly]
+                    end
+                else
+                    -- External neighbor (cross-tile)
+                    local edgeBase = (p - 1) * 6
+                    local neiTileId = soa.extToTile and soa.extToTile[edgeBase + e]
+                    neiPoly = soa.extToPoly and soa.extToPoly[edgeBase + e]
+
+                    if neiTileId and neiTileId ~= 0 and neiPoly and neiPoly > 0 then
+                        neiTile = soa_tiles[neiTileId]
+                        if neiTile and neiTile.pCx and neiPoly <= neiTile.polyCount then
+                            neiCx = neiTile.pCx[neiPoly]
+                            neiCy = neiTile.pCy[neiPoly]
+                            neiCz = neiTile.pCz[neiPoly]
+                        end
+                    end
+                end
+
+                if neiCx and neiCy and neiPoly then
+                    -- Calculate slope from edge midpoint to neighbor center
+                    local mz = (z1 + z2) * 0.5
+                    local targetZ = neiCz or mz
+                    local heightDiff = targetZ - mz  -- Positive = neighbor is above us
+
+                    -- Calculate XY distance to neighbor
+                    local mx = (x1 + x2) * 0.5
+                    local my = (y1 + y2) * 0.5
+                    local dxNei = neiCx - mx
+                    local dyNei = neiCy - my
+                    local xyDist = math.sqrt(dxNei * dxNei + dyNei * dyNei)
+
+                    -- Calculate slope ratio (Z change per XY distance)
+                    local slope = 0
+                    if xyDist > 0.1 then
+                        slope = heightDiff / xyDist
+                    end
+
+                    -- Determine color based on slope
+                    local arrow_color
+                    if slope > CONFIG.max_walkable_slope then
+                        -- Too steep to climb up
+                        arrow_color = CONFIG.link_climb_color  -- Red
+                    elseif slope < -CONFIG.drop_slope then
+                        -- Steep drop down
+                        arrow_color = CONFIG.link_drop_color   -- Yellow
+                    else
+                        -- Walkable slope
+                        arrow_color = CONFIG.link_walk_color   -- Green
+                    end
+
+                    draw_arrow(x1, y1, z1, x2, y2, z2,
+                              neiCx, neiCy, targetZ,
+                              arrow_color, CONFIG.link_thickness)
+                    drawn = drawn + 1
+                end
+
+                ::continue_edge::
+            end
+        end
+        ::continue_tile::
+    end
+
+    return drawn
+end
+
 -- Draw a single polygon (legacy, uses polygon fan)
 local function draw_polygon(poly, player_pos)
     if not poly.worldVerts or #poly.worldVerts < 3 then
@@ -649,6 +853,32 @@ end
 -- Enable/disable BVNode visualization
 function Wireframe.set_bvnodes_enabled(enabled)
     CONFIG.draw_bvnodes = enabled
+end
+
+-- Enable/disable cross-tile connection visualization
+function Wireframe.set_cross_tile_enabled(enabled)
+    CONFIG.draw_cross_tile = enabled
+end
+
+-- Render cross-tile connections from NavWorld's SoA tiles
+-- Call this from main.lua after Wireframe.render() with PathState.world:get_all_tiles()
+function Wireframe.render_cross_tile(soa_tiles)
+    if not CONFIG.enabled then
+        return 0
+    end
+
+    local player = core.object_manager.get_local_player()
+    if not player then return 0 end
+
+    local player_pos = player:get_position()
+    if not player_pos then return 0 end
+
+    -- Force enable for drawing (follows wireframe toggle)
+    local old_state = CONFIG.draw_cross_tile
+    CONFIG.draw_cross_tile = true
+    local drawn = draw_cross_tile_connections(soa_tiles, player_pos)
+    CONFIG.draw_cross_tile = old_state
+    return drawn
 end
 
 -- Clear tile cache

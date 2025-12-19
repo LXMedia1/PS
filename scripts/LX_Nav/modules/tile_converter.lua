@@ -42,10 +42,15 @@ function TileConverter.convert(tile, mapId)
         tileX = tile.tileX,
         tileY = tile.tileY,
         layer = tile.layer or 0,  -- For multi-level (ground vs roof at same X,Y)
-        walkableClimb = tile.walkableClimb or 0.6,  -- Max step height for edge validation
         tileId = TileConverter.tile_id(mapId, tile.tileX, tile.tileY),
         polyCount = polyCount,
         vertCount = vertCount,
+
+        -- Navigation parameters (from dtMeshHeader)
+        walkableHeight = mh.walkableHeight or 2.0,  -- Agent height
+        walkableRadius = mh.walkableRadius or 0.6,  -- Agent radius
+        walkableClimb = mh.walkableClimb or 0.6,    -- Max step height
+        offMeshBase = mh.offMeshBase or 0,          -- Where off-mesh polys start
 
         -- Vertex arrays (1-based)
         vx = vx,
@@ -54,8 +59,10 @@ function TileConverter.convert(tile, mapId)
 
         -- Per-polygon arrays (1-based poly index)
         pVertCount = {},  -- u8: vertex count per poly (3-6)
-        pArea = {},       -- u8: area type (1=ground, 2=water, etc)
-        pFlags = {},      -- u16: flags
+        pArea = {},       -- u8: area type (0=ground, 1=water, 2=road, 3=danger)
+        pFlags = {},      -- u16: flags (WALK, SWIM, etc)
+        pPolyType = {},   -- u8: poly type (0=ground, 1=offmesh)
+        pFirstLink = {},  -- u32: first link index for each polygon
 
         -- Packed per-poly edge arrays: index = (poly-1)*6 + edge
         -- This allows O(1) access to any edge of any polygon
@@ -88,6 +95,14 @@ function TileConverter.convert(tile, mapId)
 
         -- Off-mesh connections (jumps/teleports)
         offMeshConnections = tile.offMeshConnections or {},
+
+        -- Links for cross-tile adjacency (pre-computed by Detour)
+        -- Flat array: [i*5+1..5] = refLo, refHi, next, edge+side*256, bmin+bmax*256
+        links = {},
+        linkCount = 0,
+
+        -- Liquid data (for water detection and cost)
+        liquid = tile.liquid,
     }
 
     -- Convert polygons to packed format
@@ -96,8 +111,10 @@ function TileConverter.convert(tile, mapId)
         local nv = poly.vertCount
 
         soa.pVertCount[p] = nv
-        soa.pArea[p] = poly.areaType or 1
-        soa.pFlags[p] = poly.flags or 0
+        soa.pArea[p] = poly.area or 0       -- Area type (0=ground, 1=water, etc) - fixed from poly.areaType
+        soa.pFlags[p] = poly.flags or 0     -- Polygon flags (WALK, SWIM, etc)
+        soa.pPolyType[p] = poly.polyType or 0  -- Poly type (0=ground, 1=offmesh)
+        soa.pFirstLink[p] = poly.firstLink or 0  -- First link index for this polygon
 
         local base = (p - 1) * 6
         local cx, cy, cz = 0, 0, 0
@@ -152,6 +169,23 @@ function TileConverter.convert(tile, mapId)
             soa.detailTris[base + 2] = tri.v1
             soa.detailTris[base + 3] = tri.v2
             soa.detailTris[base + 4] = tri.flags
+        end
+    end
+
+    -- Flatten links to flat array format (5 values per link)
+    -- NOTE: Links in mmtile are mostly internal. External links exist but aren't
+    -- usable for cross-tile resolution (no owner polygon info). We keep them
+    -- stored for potential future use but use EdgeResolver for cross-tile matching.
+    if tile.links and #tile.links > 0 then
+        soa.linkCount = #tile.links
+        for i = 1, #tile.links do
+            local link = tile.links[i]
+            local base = (i - 1) * 5
+            soa.links[base + 1] = link.refLo or 0
+            soa.links[base + 2] = link.refHi or 0
+            soa.links[base + 3] = link.next or 0xFFFFFFFF
+            soa.links[base + 4] = (link.edge or 0) + (link.side or 0xFF) * 256
+            soa.links[base + 5] = (link.bmin or 0) + (link.bmax or 0) * 256
         end
     end
 
