@@ -55,54 +55,60 @@ local saved_positions = {}  -- {name: {x, y, z, map_id}}
 -- Path transition state
 local old_path = nil  -- Previous path for smooth transitions
 local transition_progress = 1.0  -- 0.0 = full old path, 1.0 = full new path
-local transition_speed = 3.0  -- How fast to transition (per second)
+local transition_speed = 1.5  -- How fast to transition (per second)
 local path_updating = false  -- True when path is being recalculated
 
 -- Path smoothing settings
 local smooth_enabled = true
-local smooth_subdivisions = 3  -- Points to add between each original waypoint
+local smooth_subdivisions = 5  -- Points to add between each original waypoint
 
 -----------------------------------------------------------
--- Path Smoothing (Catmull-Rom Spline)
+-- Path Smoothing (Cubic B-spline)
 -----------------------------------------------------------
 
--- Catmull-Rom spline interpolation
-local function catmull_rom(p0, p1, p2, p3, t)
-    local t2 = t * t
-    local t3 = t2 * t
-
-    local x = 0.5 * ((2 * p1.x) +
-        (-p0.x + p2.x) * t +
-        (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
-        (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3)
-
-    local y = 0.5 * ((2 * p1.y) +
-        (-p0.y + p2.y) * t +
-        (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
-        (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3)
-
-    local z = 0.5 * ((2 * p1.z) +
-        (-p0.z + p2.z) * t +
-        (2 * p0.z - 5 * p1.z + 4 * p2.z - p3.z) * t2 +
-        (-p0.z + 3 * p1.z - 3 * p2.z + p3.z) * t3)
-
-    return {x = x, y = y, z = z}
+-- Cubic B-spline basis functions
+local function bspline_basis(i, t)
+    if i == 0 then
+        return (1 - t)^3 / 6
+    elseif i == 1 then
+        return (3 * t^3 - 6 * t^2 + 4) / 6
+    elseif i == 2 then
+        return (-3 * t^3 + 3 * t^2 + 3 * t + 1) / 6
+    elseif i == 3 then
+        return t^3 / 6
+    end
+    return 0
 end
 
--- Smooth a path using Catmull-Rom splines
+-- Cubic B-spline interpolation between 4 control points
+local function bspline_cubic(p0, p1, p2, p3, t)
+    local b0 = bspline_basis(0, t)
+    local b1 = bspline_basis(1, t)
+    local b2 = bspline_basis(2, t)
+    local b3 = bspline_basis(3, t)
+
+    return {
+        x = b0 * p0.x + b1 * p1.x + b2 * p2.x + b3 * p3.x,
+        y = b0 * p0.y + b1 * p1.y + b2 * p2.y + b3 * p3.y,
+        z = b0 * p0.z + b1 * p1.z + b2 * p2.z + b3 * p3.z
+    }
+end
+
+-- Smooth a path using Cubic B-splines
 local function smooth_path(points, subdivisions, is_loop)
     if #points < 3 then return points end
 
     local smoothed = {}
     local n = #points
 
-    for i = 1, n do
-        -- Get 4 control points for the spline
+    -- For each segment between control points
+    for i = 1, n - 1 do
+        -- Get 4 control points for B-spline
         local p0, p1, p2, p3
 
         if is_loop then
-            p0 = points[((i - 2) % n) + 1]
-            p1 = points[i]
+            p0 = points[((i - 2 + n) % n) + 1]
+            p1 = points[((i - 1 + n) % n) + 1]
             p2 = points[(i % n) + 1]
             p3 = points[((i + 1) % n) + 1]
         else
@@ -113,17 +119,17 @@ local function smooth_path(points, subdivisions, is_loop)
             p3 = points[math.min(n, i + 2)]
         end
 
-        -- Add the original point
-        table.insert(smoothed, {x = p1.x, y = p1.y, z = p1.z})
-
-        -- Add subdivided points (except for the last segment in non-loop)
-        if is_loop or i < n then
-            for j = 1, subdivisions do
-                local t = j / (subdivisions + 1)
-                local interp = catmull_rom(p0, p1, p2, p3, t)
-                table.insert(smoothed, interp)
-            end
+        -- Generate interpolated points along the B-spline curve
+        for j = 0, subdivisions do
+            local t = j / subdivisions
+            local interp = bspline_cubic(p0, p1, p2, p3, t)
+            table.insert(smoothed, interp)
         end
+    end
+
+    -- Add final point if not looping
+    if not is_loop then
+        table.insert(smoothed, {x = points[n].x, y = points[n].y, z = points[n].z})
     end
 
     return smoothed
@@ -677,7 +683,6 @@ local function update_movement()
                             nav_target_pos = new_target_pos
 
                             -- Find closest waypoint on new path to maintain smooth movement
-                            -- This prevents jarring stops/restarts
                             current_index = find_closest_waypoint()
                         end
                     end
@@ -807,27 +812,49 @@ local function render_path()
 
     -- ========== MORPH OLD PATH TO NEW PATH ==========
     if old_path and old_path.points and #old_path.points > 0 and transition_progress < 1.0 then
-        -- Interpolate between old and new path waypoints
+        -- Simultaneously blend all points with the same transition progress
         local old_count = #old_path.points
         local new_count = #current_path.points
+        local t = transition_progress  -- Same blend factor for ALL points
 
-        -- Use the new path size as target, interpolate positions
-        for i = 1, new_count do
-            local new_p = current_path.points[i]
+        if old_count == new_count then
+            -- Same number of points - direct 1:1 blending
+            for i = 1, new_count do
+                local old_p = old_path.points[i]
+                local new_p = current_path.points[i]
 
-            -- Map index from new path to old path (proportional mapping)
-            local old_i = math.floor((i - 1) * (old_count - 1) / math.max(1, new_count - 1)) + 1
-            old_i = math.min(old_i, old_count)
+                display_points[i] = {
+                    x = old_p.x + (new_p.x - old_p.x) * t,
+                    y = old_p.y + (new_p.y - old_p.y) * t,
+                    z = old_p.z + (new_p.z - old_p.z) * t
+                }
+            end
+        else
+            -- Different number of points - interpolate to match new path length
+            for i = 1, new_count do
+                local new_p = current_path.points[i]
 
-            local old_p = old_path.points[old_i]
+                -- Map to old path position (proportional)
+                local old_t = (i - 1) / math.max(1, new_count - 1)
+                local old_index = 1 + old_t * (old_count - 1)
+                local old_i1 = math.floor(old_index)
+                local old_i2 = math.min(old_count, old_i1 + 1)
+                local frac = old_index - old_i1
 
-            -- Lerp between old and new position
-            local t = transition_progress
-            local lerp_x = old_p.x + (new_p.x - old_p.x) * t
-            local lerp_y = old_p.y + (new_p.y - old_p.y) * t
-            local lerp_z = old_p.z + (new_p.z - old_p.z) * t
+                -- Interpolate position in old path
+                local old_p1 = old_path.points[old_i1]
+                local old_p2 = old_path.points[old_i2]
+                local old_x = old_p1.x + (old_p2.x - old_p1.x) * frac
+                local old_y = old_p1.y + (old_p2.y - old_p1.y) * frac
+                local old_z = old_p1.z + (old_p2.z - old_p1.z) * frac
 
-            display_points[i] = {x = lerp_x, y = lerp_y, z = lerp_z}
+                -- Blend from old to new with same t for all points
+                display_points[i] = {
+                    x = old_x + (new_p.x - old_x) * t,
+                    y = old_y + (new_p.y - old_y) * t,
+                    z = old_z + (new_p.z - old_z) * t
+                }
+            end
         end
     else
         -- No transition, use current path directly
