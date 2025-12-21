@@ -735,6 +735,61 @@ local function step_cost(tileA, polyA, tileB, polyB)
         c = c * dangerPenalty
     end
 
+    -- NARROW CORRIDOR PENALTY: Check if polygon is squeezed between walls (tight passage)
+    -- Count how many walls are nearby (within 3 yards) to detect narrow passages
+    local nearbyWalls = 0
+    for e = 1, nvB do
+        local nei = tileB.pNeis[baseB + e]
+        if nei == 0 then  -- Wall edge
+            local v0 = tileB.pVerts[baseB + e]
+            local v1 = tileB.pVerts[baseB + (e % nvB) + 1]
+            local wx0, wy0 = tileB.vx[v0], tileB.vy[v0]
+            local wx1, wy1 = tileB.vx[v1], tileB.vy[v1]
+
+            -- Find closest point on wall edge to polygon center
+            local edgeX = wx1 - wx0
+            local edgeY = wy1 - wy0
+            local edgeLen = edgeX * edgeX + edgeY * edgeY
+
+            if edgeLen > 0.001 then
+                local t = ((bx - wx0) * edgeX + (by - wy0) * edgeY) / edgeLen
+                t = math.max(0, math.min(1, t))
+
+                local closestX = wx0 + t * edgeX
+                local closestY = wy0 + t * edgeY
+
+                local distSq = (bx - closestX) * (bx - closestX) + (by - closestY) * (by - closestY)
+                local dist = math.sqrt(distSq)
+
+                -- Count walls within 3 yards
+                if dist < 3.0 then
+                    nearbyWalls = nearbyWalls + 1
+                end
+            end
+        end
+    end
+
+    -- If surrounded by walls on 2+ sides within 3 yards, it's a narrow corridor
+    -- If the corridor is less than 1 yard wide (nearestWallDist < 0.5 and walls on multiple sides),
+    -- treat it as unwalkable
+    if nearbyWalls >= 2 and nearestWallDist < 0.5 then
+        -- Corridor narrower than 1 yard - effectively unwalkable
+        return c * 1000.0  -- Make it extremely expensive (nearly impassable)
+    end
+
+    -- Apply escalating penalty for narrow corridors: 2 walls = 3x, 3 walls = 10x, 4+ walls = 50x
+    if nearbyWalls >= 2 then
+        local narrowPenalty = 1.0
+        if nearbyWalls == 2 then
+            narrowPenalty = 3.0  -- Moderately narrow
+        elseif nearbyWalls == 3 then
+            narrowPenalty = 10.0  -- Very narrow
+        else
+            narrowPenalty = 50.0  -- Extremely tight squeeze
+        end
+        c = c * narrowPenalty
+    end
+
     return c
 end
 
@@ -1534,122 +1589,45 @@ local function getPortalEndpoints(polyPath, fromIdx, toIdx, world, dirX, dirY)
         return nil, nil
     end
 
-    -- Portal shrinking: shift endpoints away from walls by 1 yard to respect inner wall boundary
-    local clearance = 1.0
+    -- Portal shrinking: PROPORTIONAL approach for balanced clearance
+    -- Shrink portals toward their center to maintain body clearance
+    -- without creating asymmetric artifacts at corners
 
-    -- Helper: Find if vertex (vx, vy) is part of a wall edge, and get wall direction
-    local function findWallAtVertex(tile, polyIdx, vx, vy)
-        local base = (polyIdx - 1) * 6
-        local nv = tile.pVertCount[polyIdx]
+    -- Calculate portal width
+    local dx = x1 - x0
+    local dy = y1 - y0
+    local portalWidth = math.sqrt(dx * dx + dy * dy)
 
-        for e = 1, nv do
-            local nei = tile.pNeis[base + e]
-            if nei == 0 then  -- Wall edge
-                local v0 = tile.pVerts[base + e]
-                local v1 = tile.pVerts[base + (e % nv) + 1]
-                local wx0, wy0 = tile.vx[v0], tile.vy[v0]
-                local wx1, wy1 = tile.vx[v1], tile.vy[v1]
+    -- Only shrink portals that are wide enough (> 2 yards)
+    -- Narrow passages stay at original width to avoid collapse
+    if portalWidth > 2.0 then
+        -- Calculate portal center
+        local centerX = (x0 + x1) / 2
+        local centerY = (y0 + y1) / 2
 
-                -- Check if this wall edge contains our vertex
-                if (math.abs(wx0 - vx) < 0.01 and math.abs(wy0 - vy) < 0.01) or
-                   (math.abs(wx1 - vx) < 0.01 and math.abs(wy1 - vy) < 0.01) then
-                    -- Return wall edge direction
-                    return wx1 - wx0, wy1 - wy0, wx0, wy0, wx1, wy1
-                end
-            end
-        end
-        return nil
-    end
+        -- Shrink by moving endpoints toward center
+        -- Amount to shrink: 1.0 yard from each side, but cap at 40% of portal width
+        local shrinkAmount = math.min(1.0, portalWidth * 0.4)
 
-    -- Check x0 for walls in polyA
-    local wall0_ex, wall0_ey, wall0_x0, wall0_y0, wall0_x1, wall0_y1 = findWallAtVertex(tileA, polyA, x0, y0)
-    if wall0_ex then
-        -- Calculate perpendicular to wall, pointing inward
-        local elen = math.sqrt(wall0_ex * wall0_ex + wall0_ey * wall0_ey)
-        if elen > 0.01 then
-            local perpX = -wall0_ey / elen
-            local perpY = wall0_ex / elen
+        -- Direction from center to each endpoint
+        local dir0x = x0 - centerX
+        local dir0y = y0 - centerY
+        local dir1x = x1 - centerX
+        local dir1y = y1 - centerY
 
-            -- Ensure it points toward polygon center
-            local cx, cy = tileA.pCx[polyA], tileA.pCy[polyA]
-            local midX = (wall0_x0 + wall0_x1) / 2
-            local midY = (wall0_y0 + wall0_y1) / 2
-            local dot = perpX * (cx - midX) + perpY * (cy - midY)
-            if dot < 0 then
-                perpX = -perpX
-                perpY = -perpY
-            end
+        local len0 = math.sqrt(dir0x * dir0x + dir0y * dir0y)
+        local len1 = math.sqrt(dir1x * dir1x + dir1y * dir1y)
 
-            x0 = x0 + perpX * clearance
-            y0 = y0 + perpY * clearance
-        end
-    end
-
-    -- Check x1 for walls in polyA
-    local wall1_ex, wall1_ey, wall1_x0, wall1_y0, wall1_x1, wall1_y1 = findWallAtVertex(tileA, polyA, x1, y1)
-    if wall1_ex then
-        local elen = math.sqrt(wall1_ex * wall1_ex + wall1_ey * wall1_ey)
-        if elen > 0.01 then
-            local perpX = -wall1_ey / elen
-            local perpY = wall1_ex / elen
-
-            local cx, cy = tileA.pCx[polyA], tileA.pCy[polyA]
-            local midX = (wall1_x0 + wall1_x1) / 2
-            local midY = (wall1_y0 + wall1_y1) / 2
-            local dot = perpX * (cx - midX) + perpY * (cy - midY)
-            if dot < 0 then
-                perpX = -perpX
-                perpY = -perpY
-            end
-
-            x1 = x1 + perpX * clearance
-            y1 = y1 + perpY * clearance
-        end
-    end
-
-    -- Also check polyB for walls
-    local tileB = world.tilesById[tileBId]
-    if tileB then
-        local wallB0_ex, wallB0_ey, wallB0_x0, wallB0_y0, wallB0_x1, wallB0_y1 = findWallAtVertex(tileB, polyB, x0, y0)
-        if wallB0_ex and not wall0_ex then  -- Only shift if not already shifted
-            local elen = math.sqrt(wallB0_ex * wallB0_ex + wallB0_ey * wallB0_ey)
-            if elen > 0.01 then
-                local perpX = -wallB0_ey / elen
-                local perpY = wallB0_ex / elen
-
-                local cx, cy = tileB.pCx[polyB], tileB.pCy[polyB]
-                local midX = (wallB0_x0 + wallB0_x1) / 2
-                local midY = (wallB0_y0 + wallB0_y1) / 2
-                local dot = perpX * (cx - midX) + perpY * (cy - midY)
-                if dot < 0 then
-                    perpX = -perpX
-                    perpY = -perpY
-                end
-
-                x0 = x0 + perpX * clearance
-                y0 = y0 + perpY * clearance
-            end
+        if len0 > 0.01 then
+            -- Move x0 toward center
+            x0 = x0 - (dir0x / len0) * shrinkAmount
+            y0 = y0 - (dir0y / len0) * shrinkAmount
         end
 
-        local wallB1_ex, wallB1_ey, wallB1_x0, wallB1_y0, wallB1_x1, wallB1_y1 = findWallAtVertex(tileB, polyB, x1, y1)
-        if wallB1_ex and not wall1_ex then
-            local elen = math.sqrt(wallB1_ex * wallB1_ex + wallB1_ey * wallB1_ey)
-            if elen > 0.01 then
-                local perpX = -wallB1_ey / elen
-                local perpY = wallB1_ex / elen
-
-                local cx, cy = tileB.pCx[polyB], tileB.pCy[polyB]
-                local midX = (wallB1_x0 + wallB1_x1) / 2
-                local midY = (wallB1_y0 + wallB1_y1) / 2
-                local dot = perpX * (cx - midX) + perpY * (cy - midY)
-                if dot < 0 then
-                    perpX = -perpX
-                    perpY = -perpY
-                end
-
-                x1 = x1 + perpX * clearance
-                y1 = y1 + perpY * clearance
-            end
+        if len1 > 0.01 then
+            -- Move x1 toward center
+            x1 = x1 - (dir1x / len1) * shrinkAmount
+            y1 = y1 - (dir1y / len1) * shrinkAmount
         end
     end
 
@@ -2134,6 +2112,46 @@ local function corridor_follower(polyPath, startPos, endPos, world, nq)
         originalWaypoints[i] = {x = waypoints[i].x, y = waypoints[i].y, z = waypoints[i].z}
     end
 
+    -- SHARP ANGLE SMOOTHING: Remove waypoints that create unnatural direction changes
+    -- This fixes weird curves from portal shrinking at corners
+    local angleThreshold = math.cos(math.rad(100))  -- Remove if angle > 100 degrees (sharp backward turn)
+    local i = 2
+    while i <= #waypoints - 1 do
+        local prev = waypoints[i - 1]
+        local curr = waypoints[i]
+        local next = waypoints[i + 1]
+
+        -- Calculate vectors
+        local v1x = curr.x - prev.x
+        local v1y = curr.y - prev.y
+        local v2x = next.x - curr.x
+        local v2y = next.y - curr.y
+
+        local len1 = math.sqrt(v1x * v1x + v1y * v1y)
+        local len2 = math.sqrt(v2x * v2x + v2y * v2y)
+
+        if len1 > 0.1 and len2 > 0.1 then
+            -- Normalize
+            v1x, v1y = v1x / len1, v1y / len1
+            v2x, v2y = v2x / len2, v2y / len2
+
+            -- Dot product = cos(angle)
+            local dot = v1x * v2x + v1y * v2y
+
+            -- If sharp angle (> 120 degrees), remove this waypoint
+            if dot < angleThreshold then
+                testLog = testLog .. string.format("Smoothed: Removed WP[%d] (%.1f,%.1f) - sharp angle\n",
+                    i, curr.x, curr.y)
+                table.remove(waypoints, i)
+                -- Don't increment i, check next waypoint at same position
+            else
+                i = i + 1
+            end
+        else
+            i = i + 1
+        end
+    end
+
     -- Backwards waypoint removal disabled - was making paths worse
     --[[
     if waypoints and #waypoints >= 3 then
@@ -2193,8 +2211,10 @@ local function corridor_follower(polyPath, startPos, endPos, world, nq)
     end
     --]]
 
-    -- WAYPOINT SIMPLIFICATION: Remove unnecessary intermediate waypoints
-    -- Check if we can skip waypoints by going directly from i to i+2
+    -- WAYPOINT SIMPLIFICATION: Disabled to preserve natural corner flow
+    -- The funnel algorithm already generates optimal waypoints, and simplification
+    -- was causing unnatural diagonal cuts across corners
+    --[[
     local simplified = 0
     local i = 1
     while i <= #waypoints - 2 do
@@ -2203,18 +2223,15 @@ local function corridor_follower(polyPath, startPos, endPos, world, nq)
         local after = waypoints[i + 2]
 
         -- Check if we can skip 'next' by going directly from curr to after
-        -- Simple heuristic: if the detour through 'next' is small, skip it
         local directDist = math.sqrt((after.x - curr.x)^2 + (after.y - curr.y)^2)
         local detourDist = math.sqrt((next.x - curr.x)^2 + (next.y - curr.y)^2) +
                           math.sqrt((after.x - next.x)^2 + (after.y - next.y)^2)
 
-        -- If detour is less than 5% longer than direct path, skip the intermediate waypoint
-        if detourDist < directDist * 1.05 then
+        if detourDist < directDist * 1.02 then
             testLog = testLog .. string.format("Simplified: Removed WP[%d] (%.1f,%.1f) - unnecessary detour\n",
                 i + 1, next.x, next.y)
             table.remove(waypoints, i + 1)
             simplified = simplified + 1
-            -- Don't increment i, check if we can skip more
         else
             i = i + 1
         end
@@ -2223,6 +2240,7 @@ local function corridor_follower(polyPath, startPos, endPos, world, nq)
     if simplified > 0 then
         testLog = testLog .. string.format("Simplification: Removed %d unnecessary waypoint(s)\n", simplified)
     end
+    --]]
 
     -- Generate owners: map each waypoint to a polygon index
     -- For funnel output, approximate based on position in corridor
