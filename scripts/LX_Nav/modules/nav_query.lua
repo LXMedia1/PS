@@ -1966,6 +1966,29 @@ local function corridor_follower(polyPath, startPos, endPos, world, nq)
     -- Run funnel algorithm (string-pulling)
     local waypoints = stringPull(portalsL, portalsR)
 
+    -- Remove backwards waypoints (WP[2] that goes opposite to destination)
+    if waypoints and #waypoints >= 3 then
+        local wp1 = waypoints[1]
+        local wp2 = waypoints[2]
+        local wpLast = waypoints[#waypoints]
+
+        -- Direction from start to destination
+        local dx_dest = wpLast.x - wp1.x
+        local dy_dest = wpLast.y - wp1.y
+
+        -- Direction from start to WP[2]
+        local dx_wp2 = wp2.x - wp1.x
+        local dy_wp2 = wp2.y - wp1.y
+
+        -- Dot product: if negative, WP[2] is backwards
+        local dot = dx_dest * dx_wp2 + dy_dest * dy_wp2
+
+        if dot < 0 then
+            -- WP[2] is backwards, remove it
+            table.remove(waypoints, 2)
+        end
+    end
+
     -- Validate slopes - reject paths that go over cliffs
     local valid, failIdx, failSlope = validateWaypointSlopes(waypoints)
     if not valid then
@@ -2377,11 +2400,13 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
 
     -- CORRIDOR MODE: Smooth, human-like paths with wall avoidance (research-based)
     if PATH_MODE == "corridor" then
-        local clampedStart = {x = sx, y = sy, z = startPos.z}
-        local clampedEnd = {x = ex, y = ey, z = endPos.z}
+        -- Use ACTUAL start/end positions for funnel, not clamped
+        -- Clamping is only for Detour's polygon validation, not for player pathfinding
+        local actualStart = {x = startPos.x, y = startPos.y, z = startPos.z}
+        local actualEnd = {x = endPos.x, y = endPos.y, z = endPos.z}
 
         -- Generate path using corridor follower (dense waypoints with wall avoidance)
-        local out, owners = corridor_follower(polyPath, clampedStart, clampedEnd, world, self)
+        local out, owners = corridor_follower(polyPath, actualStart, actualEnd, world, self)
 
         -- Fix Z heights using polygon ownership
         fixWaypointHeights(out, owners, polyPath, world, startPos, self)
@@ -2394,11 +2419,12 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
 
     -- VISIBILITY MODE: Greedy "look ahead as far as possible" with safe distance
     if PATH_MODE == "visibility" then
-        local clampedStart = {x = sx, y = sy, z = startPos.z}
-        local clampedEnd = {x = ex, y = ey, z = endPos.z}
+        -- Use ACTUAL start/end positions, not clamped
+        local actualStart = {x = startPos.x, y = startPos.y, z = startPos.z}
+        local actualEnd = {x = endPos.x, y = endPos.y, z = endPos.z}
 
         -- Generate path using visibility-based straightening (returns owners too)
-        local out, owners = straightenPathGreedy(polyPath, clampedStart, clampedEnd, world)
+        local out, owners = straightenPathGreedy(polyPath, actualStart, actualEnd, world)
 
         -- Apply safe distance from walls (may push waypoints slightly)
         out = applySafeDistance(out, polyPath, world)
