@@ -635,13 +635,13 @@ local function update_movement()
             end)
 
             if success and new_target_pos then
-                -- Check if target has moved (> 1 yard)
+                -- Check if target has moved (> 3 yards)
                 local dx = new_target_pos.x - nav_target_pos.x
                 local dy = new_target_pos.y - nav_target_pos.y
                 local dz = new_target_pos.z - nav_target_pos.z
                 local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
 
-                if dist > 1.0 then
+                if dist > 3.0 then
                     -- Target moved, recalculate path with smoothing
                     core.log("[LX_Mover] Target moved, updating path...")
                     path_updating = true
@@ -797,6 +797,7 @@ local function render_path()
 
     local player = core.object_manager.get_local_player()
     local player_pos = player and player:get_position() or nil
+    if not player_pos then return end
 
     -- Color
     local col_smooth = color.new(0, 200, 100, 200)  -- Green - smoothed path
@@ -833,8 +834,17 @@ local function render_path()
         display_points = current_path.points
     end
 
-    -- Convert display points to screen coordinates
-    for i, p in ipairs(display_points) do
+    -- Only draw path from current waypoint forward (not backward)
+    local start_index = 1
+    if current_index and current_index > 0 then
+        start_index = current_index  -- Start from current waypoint, not behind
+    end
+
+    -- Convert display points to screen coordinates (only from start_index onwards)
+    local player_screen = core.graphics.w2s(vec3.new(player_pos.x, player_pos.y, player_pos.z))
+
+    for i = start_index, #display_points do
+        local p = display_points[i]
         local world_pos = vec3.new(p.x, p.y, p.z)
         local screen = core.graphics.w2s(world_pos)
         if screen and screen.x > 0 and screen.y > 0 then
@@ -844,9 +854,19 @@ local function render_path()
         end
     end
 
-    -- Draw morphing path
-    for i = 1, #display_points - 1 do
-        if points_2d[i].valid and points_2d[i + 1].valid then
+    -- Draw line from player to first waypoint
+    if player_screen and player_screen.x > 0 and player_screen.y > 0 and points_2d[start_index] and points_2d[start_index].valid then
+        core.graphics.line_2d(
+            vec2.new(player_screen.x, player_screen.y),
+            vec2.new(points_2d[start_index].x, points_2d[start_index].y),
+            col_smooth,
+            2
+        )
+    end
+
+    -- Draw morphing path (only from current position onwards)
+    for i = start_index, #display_points - 1 do
+        if points_2d[i] and points_2d[i].valid and points_2d[i + 1] and points_2d[i + 1].valid then
             core.graphics.line_2d(
                 vec2.new(points_2d[i].x, points_2d[i].y),
                 vec2.new(points_2d[i + 1].x, points_2d[i + 1].y),
@@ -1289,25 +1309,21 @@ local function handle_click_to_path()
 
     -- Detect click edge (mouse was up, now down)
     if is_mouse_down and not prev_mouse_down then
-        -- Try to get world position at cursor using collision query
-        if core.collision and core.collision.query_position then
-            local world_pos = core.collision.query_position()
-            if world_pos then
-                core.log(string.format("[LX_Mover] Pathfinding to clicked position (%.1f, %.1f, %.1f)",
-                    world_pos.x, world_pos.y, world_pos.z))
+        -- Get world position at cursor (same API as LX_Nav)
+        local world_pos = core.graphics.get_cursor_world_position()
+        if world_pos then
+            core.log(string.format("[LX_Mover] Pathfinding to clicked position (%.1f, %.1f, %.1f)",
+                world_pos.x, world_pos.y, world_pos.z))
 
-                -- Request path to clicked position
-                if request_path_to_position(world_pos, nil) then
-                    -- Start moving
-                    start_path()
-                end
-
-                click_to_path_mode = false
-            else
-                core.log_warning("[LX_Mover] Could not get world position at cursor")
+            -- Request path to clicked position
+            if request_path_to_position(world_pos, nil) then
+                -- Start moving
+                start_path()
             end
+
+            click_to_path_mode = false
         else
-            core.log_error("[LX_Mover] Collision API not available - click-to-path not supported")
+            core.log_warning("[LX_Mover] Could not get world position at cursor")
             click_to_path_mode = false
         end
     end
