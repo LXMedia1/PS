@@ -289,6 +289,141 @@ local function is_offmesh_poly(tile, poly)
 end
 
 -- =========================
+-- Internal Link Traversal Utilities
+-- =========================
+-- These functions decode and traverse Detour's internal links (side=0xFF)
+-- to find off-mesh connections (jumps, teleports, etc.) for A* expansion
+
+-- Detour link constants
+local DT_NULL_LINK = 0xFFFFFFFF  -- End of link chain marker
+local DT_INTERNAL_LINK_SIDE = 0xFF  -- Side value for internal (non-cross-tile) links
+
+-- Decode 64-bit polygon reference to extract tile ID and polygon index
+-- Detour encoding: salt(12 bits) + tile(21 bits) + poly(31 bits)
+-- refLo contains poly (bits 0-30) and MSB of tile (bit 31)
+-- refHi contains tile (bits 0-19) and salt (bits 20-31)
+local function decode_poly_ref(refLo, refHi)
+    if not refLo or refLo == 0 then
+        return 0, 0  -- Invalid reference
+    end
+
+    -- Extract polygon index: bits 0-30 of refLo (31 bits)
+    local poly = refLo % 0x80000000  -- bits 0-30
+
+    -- Extract tile ID: bit 31 of refLo + bits 0-19 of refHi (21 bits total)
+    local tileLo = math.floor(refLo / 0x80000000)  -- bit 31 of refLo (0 or 1)
+    local tileHi = (refHi or 0) % 0x100000  -- bits 0-19 of refHi
+    local tileId = tileLo + tileHi * 2  -- Combine: tileLo is LSB, tileHi shifted left by 1
+
+    return tileId, poly
+end
+
+-- Get link data from flat array format
+-- Links are stored as 5 consecutive values per link:
+--   [base+1] = refLo (low 32 bits of target polygon ref)
+--   [base+2] = refHi (high 32 bits of target polygon ref)
+--   [base+3] = next link index (or DT_NULL_LINK)
+--   [base+4] = edge + side*256 (packed)
+--   [base+5] = bmin + bmax*256 (packed)
+local function get_link(soa, linkIdx)
+    if not soa.links or linkIdx == DT_NULL_LINK then
+        return nil
+    end
+
+    local base = linkIdx * 5
+    if base + 5 > #soa.links then
+        return nil
+    end
+
+    local refLo = soa.links[base + 1]
+    local refHi = soa.links[base + 2]
+    local nextLink = soa.links[base + 3]
+    local edgeSide = soa.links[base + 4]
+    local bminBmax = soa.links[base + 5]
+
+    return {
+        refLo = refLo,
+        refHi = refHi,
+        next = nextLink,
+        edge = edgeSide % 256,
+        side = math.floor(edgeSide / 256),
+        bmin = bminBmax % 256,
+        bmax = math.floor(bminBmax / 256)
+    }
+end
+
+-- Get all internal links for a polygon (side=0xFF only)
+-- Returns array of {link, targetTileId, targetPoly} or empty array
+-- Internal links are used for off-mesh connections within the same tile
+local function get_internal_links(tile, poly)
+    local results = {}
+
+    if not tile.pFirstLink or not tile.links then
+        return results
+    end
+
+    -- Get first link index for this polygon
+    local linkIdx = tile.pFirstLink[poly]
+    if not linkIdx or linkIdx == DT_NULL_LINK then
+        return results
+    end
+
+    -- Traverse the link chain
+    local maxIterations = 100  -- Safety limit to prevent infinite loops
+    local iterations = 0
+
+    while linkIdx ~= DT_NULL_LINK and iterations < maxIterations do
+        iterations = iterations + 1
+
+        local link = get_link(tile, linkIdx)
+        if not link then
+            break
+        end
+
+        -- Only process internal links (side = 0xFF)
+        if link.side == DT_INTERNAL_LINK_SIDE then
+            local targetTileId, targetPoly = decode_poly_ref(link.refLo, link.refHi)
+
+            -- Valid internal links should target the same tile
+            if targetPoly > 0 and targetPoly <= tile.polyCount then
+                table.insert(results, {
+                    link = link,
+                    targetTileId = targetTileId,
+                    targetPoly = targetPoly
+                })
+            end
+        end
+
+        -- Move to next link in chain
+        linkIdx = link.next
+    end
+
+    return results
+end
+
+-- Check if a link represents an off-mesh connection (jump, teleport, etc.)
+-- Off-mesh polygons are indexed in tile.offMeshByPoly
+local function is_offmesh_link(tile, targetPoly)
+    if not tile.offMeshByPoly or not targetPoly or targetPoly <= 0 then
+        return false
+    end
+    return tile.offMeshByPoly[targetPoly] ~= nil
+end
+
+-- Get off-mesh connection data for a polygon
+-- Returns the connection struct or nil if not an off-mesh polygon
+local function get_offmesh_connection(tile, poly)
+    if not tile.offMeshByPoly or not tile.offMeshConnections then
+        return nil
+    end
+    local connIdx = tile.offMeshByPoly[poly]
+    if not connIdx then
+        return nil
+    end
+    return tile.offMeshConnections[connIdx]
+end
+
+-- =========================
 -- Edge Avoidance Helper
 -- =========================
 
@@ -443,6 +578,44 @@ local MAX_WAYPOINT_SLOPE = 0.6       -- Max slope between waypoints (~31 degrees
 -- Penalty multiplier for polygons near boundaries (walls/cliffs/edges)
 local BOUNDARY_PENALTY = 8.0  -- Strong preference for interior polygons
 
+-- =========================
+-- Off-Mesh Connection Cost Constants
+-- =========================
+-- Off-mesh connection types (matched to userId encoding in navmesh generation)
+-- Common conventions: 0=walk, 1=jump, 2=teleport/portal, 3=ladder, 4=elevator
+local OFFMESH_TYPE = {
+    WALK = 0,       -- Standard walkable connection
+    JUMP = 1,       -- Jump/drop connection (moderate penalty)
+    TELEPORT = 2,   -- Teleport/portal (high penalty, prefer walkable)
+    LADDER = 3,     -- Ladder climb (moderate penalty)
+    ELEVATOR = 4,   -- Elevator/lift (moderate penalty)
+}
+
+-- Cost multipliers for off-mesh connection types
+local OFFMESH_TYPE_COST = {
+    [OFFMESH_TYPE.WALK] = 1.0,       -- No extra penalty for walkable
+    [OFFMESH_TYPE.JUMP] = 1.5,       -- Moderate penalty for jumps
+    [OFFMESH_TYPE.TELEPORT] = 5.0,   -- High penalty - prefer walkable routes
+    [OFFMESH_TYPE.LADDER] = 2.0,     -- Moderate penalty for ladder
+    [OFFMESH_TYPE.ELEVATOR] = 1.8,   -- Slight penalty for elevator wait time
+}
+
+-- Base multiplier for all off-mesh transitions
+local OFFMESH_BASE_PENALTY = 2.0
+
+-- Narrow connection penalty threshold and multiplier
+local OFFMESH_NARROW_RADIUS = 1.0    -- Connections with radius below this get penalty
+local OFFMESH_NARROW_PENALTY = 1.5   -- Additional multiplier for narrow connections
+
+-- Transition type names for path output (maps userId to human-readable strings)
+local OFFMESH_TYPE_NAME = {
+    [OFFMESH_TYPE.WALK] = "WALK",
+    [OFFMESH_TYPE.JUMP] = "JUMP",
+    [OFFMESH_TYPE.TELEPORT] = "TELEPORT",
+    [OFFMESH_TYPE.LADDER] = "LADDER",
+    [OFFMESH_TYPE.ELEVATOR] = "ELEVATOR",
+}
+
 local function step_cost(tileA, polyA, tileB, polyB)
     -- Get polygon centers
     local ax, ay, az = tileA.pCx[polyA], tileA.pCy[polyA], tileA.pCz[polyA]
@@ -520,6 +693,54 @@ local function step_cost(tileA, polyA, tileB, polyB)
     end
 
     return c
+end
+
+-- =========================
+-- Off-Mesh Step Cost Calculation
+-- =========================
+
+-- Calculate cost for traversing an off-mesh connection
+-- Parameters:
+--   conn: off-mesh connection with startPos, endPos, radius, userId, flags
+-- Returns: cost value (higher = less preferred)
+local function step_cost_offmesh(conn)
+    if not conn or not conn.startPos or not conn.endPos then
+        return 1e30  -- Invalid connection
+    end
+
+    -- Base cost: 3D distance between start and end positions
+    local baseDist = dist3D(
+        conn.startPos.x, conn.startPos.y, conn.startPos.z,
+        conn.endPos.x, conn.endPos.y, conn.endPos.z
+    )
+
+    -- Minimum distance to prevent zero-cost teleports
+    if baseDist < 1.0 then
+        baseDist = 1.0
+    end
+
+    -- Apply base off-mesh penalty (makes walkable paths preferred when available)
+    local cost = baseDist * OFFMESH_BASE_PENALTY
+
+    -- Apply connection type penalty based on userId
+    -- userId encodes the connection type in navmesh generation
+    local connType = conn.userId or OFFMESH_TYPE.WALK
+    local typeCost = OFFMESH_TYPE_COST[connType]
+    if typeCost then
+        cost = cost * typeCost
+    else
+        -- Unknown type - apply moderate penalty (treat as jump)
+        cost = cost * OFFMESH_TYPE_COST[OFFMESH_TYPE.JUMP]
+    end
+
+    -- Apply narrow connection penalty
+    -- Narrow connections are harder to navigate and more risky
+    local radius = conn.radius or 0.5
+    if radius < OFFMESH_NARROW_RADIUS then
+        cost = cost * OFFMESH_NARROW_PENALTY
+    end
+
+    return cost
 end
 
 -- =========================
@@ -644,6 +865,88 @@ function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, max
                                 else
                                     heap:decrease(nb, nf)
                                 end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- =========================
+        -- Off-Mesh Connection Expansion
+        -- =========================
+        -- Off-mesh polygons (jumps, teleports, etc.) connect via internal links (side=0xFF)
+        -- rather than via edge neighbors. We check internal links to enable pathfinding
+        -- across non-walkable transitions.
+
+        local internalLinks = get_internal_links(curTile, curPoly)
+        for _, linkData in ipairs(internalLinks) do
+            local nTileId = linkData.targetTileId
+            local nPoly = linkData.targetPoly
+
+            -- Internal links typically target the same tile
+            -- If tileId is 0, use current tile
+            if nTileId == 0 then
+                nTileId = curTileId
+            end
+
+            local nTile = world.tilesById[nTileId]
+            if nTile and nPoly > 0 and nPoly <= nTile.polyCount then
+                local nb = node_id(nTileId, nPoly)
+
+                -- Skip if already closed
+                if closed[nb] ~= sid then
+                    -- Get off-mesh connection data for cost calculation
+                    local conn = get_offmesh_connection(curTile, curPoly)
+                    local offmeshCost = nil
+                    local skipLink = false
+
+                    if conn and conn.startPos and conn.endPos then
+                        -- Handle unidirectional connections
+                        -- For unidirectional links, only allow traversal in the forward direction
+                        -- (from start polygon to landing polygon)
+                        if not conn.bidirectional then
+                            -- Check if current polygon is the off-mesh polygon (the "source")
+                            -- Only allow if we're at the off-mesh polygon going to the target
+                            local curIsOffmesh = is_offmesh_link(curTile, curPoly)
+                            if not curIsOffmesh then
+                                -- Current is a regular polygon trying to enter the off-mesh
+                                -- connection backwards - skip this link
+                                skipLink = true
+                            end
+                        end
+
+                        if not skipLink then
+                            -- Calculate off-mesh cost using specialized function
+                            -- Considers: 3D distance, connection type, radius penalties
+                            offmeshCost = step_cost_offmesh(conn)
+                        end
+                    elseif not skipLink then
+                        -- Fallback: use polygon center distance with base off-mesh penalty
+                        -- This handles cases where connection data is missing
+                        offmeshCost = step_cost(curTile, curPoly, nTile, nPoly)
+                        if offmeshCost < 1e30 then
+                            offmeshCost = offmeshCost * OFFMESH_BASE_PENALTY
+                        end
+                    end
+
+                    if offmeshCost and offmeshCost < 1e30 then
+                        local tentative = (g[cur] or 1e30) + offmeshCost
+
+                        if seen[nb] ~= sid or tentative < (g[nb] or 1e30) then
+                            parent[nb] = cur
+                            g[nb] = tentative
+
+                            local hx = dist2D(nTile.pCx[nPoly], nTile.pCy[nPoly],
+                                             goalTile.pCx[endPoly], goalTile.pCy[endPoly])
+                            local nf = tentative + hx
+                            f[nb] = nf
+
+                            if seen[nb] ~= sid then
+                                seen[nb] = sid
+                                heap:push(nb, nf)
+                            else
+                                heap:decrease(nb, nf)
                             end
                         end
                     end
@@ -1975,6 +2278,49 @@ local function fixWaypointHeights(waypoints, owners, polyPath, world, startPos, 
 end
 
 -- =========================
+-- Transition Type Annotation
+-- =========================
+
+-- Annotate waypoints with transition type based on their owner polygon
+-- Waypoints on off-mesh polygons get a transitionType field (WALK, JUMP, TELEPORT, LADDER, ELEVATOR)
+-- Regular walkable waypoints do not get a transitionType field (nil = normal walkable)
+-- Parameters:
+--   waypoints: array of {x, y, z} waypoints to annotate
+--   owners: parallel array of polyPath indices (owner polygon for each waypoint)
+--   polyPath: array of nodeIds from A* search
+--   world: tile world data
+local function annotate_waypoint_transitions(waypoints, owners, polyPath, world)
+    if not waypoints or not owners or not polyPath or not world then
+        return
+    end
+
+    for i, wp in ipairs(waypoints) do
+        local ownerIdx = owners[i]
+        if ownerIdx and ownerIdx > 0 and ownerIdx <= #polyPath then
+            local nodeId = polyPath[ownerIdx]
+            local tileId, poly = decode_node(nodeId)
+            local tile = world.tilesById[tileId]
+
+            if tile and is_offmesh_poly(tile, poly) then
+                -- Get the off-mesh connection data
+                local conn = get_offmesh_connection(tile, poly)
+                if conn then
+                    -- Determine transition type from connection's userId
+                    local connType = conn.userId or OFFMESH_TYPE.WALK
+                    local typeName = OFFMESH_TYPE_NAME[connType]
+                    if typeName then
+                        wp.transitionType = typeName
+                    else
+                        -- Unknown type - default to JUMP for off-mesh connections
+                        wp.transitionType = "JUMP"
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- =========================
 -- Funnel Algorithm
 -- =========================
 
@@ -1987,7 +2333,9 @@ local PATH_MODE = "corridor"
 
 -- startPos: {x, y, z}
 -- endPos: {x, y, z}
--- Returns: array of {x, y, z} waypoints
+-- Returns: array of {x, y, z, transitionType?} waypoints
+-- transitionType is only present for off-mesh connections: "WALK", "JUMP", "TELEPORT", "LADDER", "ELEVATOR"
+-- Regular walkable segments have no transitionType field (nil)
 function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
     local world = self.world
     maxPts = maxPts or 256
@@ -2013,6 +2361,9 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
         -- Fix Z heights using polygon ownership
         fixWaypointHeights(out, owners, polyPath, world, startPos, self)
 
+        -- Annotate waypoints with transition types for off-mesh connections
+        annotate_waypoint_transitions(out, owners, polyPath, world)
+
         return out
     end
 
@@ -2030,15 +2381,20 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
         -- Fix Z heights using polygon ownership (clamps XY if pushed outside)
         fixWaypointHeights(out, owners, polyPath, world, startPos, self)
 
+        -- Annotate waypoints with transition types for off-mesh connections
+        annotate_waypoint_transitions(out, owners, polyPath, world)
+
         return out
     end
 
     -- PORTAL MODE: Use portal midpoints (fallback, most waypoints)
     if PATH_MODE == "portal" then
         local out = {}
+        local owners = {}
 
-        -- Start waypoint
+        -- Start waypoint (owner = first polygon)
         out[1] = {x = startPos.x, y = startPos.y, z = startPos.z}
+        owners[1] = 1
 
         -- Add portal midpoints for each polygon transition
         for i = 1, #polyPath - 1 do
@@ -2057,11 +2413,16 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
                 end
 
                 out[#out + 1] = {x = midX, y = midY, z = midZ}
+                owners[#out] = i + 1  -- Portal enters polygon i+1
             end
         end
 
-        -- End waypoint
+        -- End waypoint (owner = last polygon)
         out[#out + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
+        owners[#out] = #polyPath
+
+        -- Annotate waypoints with transition types for off-mesh connections
+        annotate_waypoint_transitions(out, owners, polyPath, world)
 
         return out
     end
@@ -2212,6 +2573,9 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
             wp.z = startPos.z + 0.5
         end
     end
+
+    -- Annotate waypoints with transition types for off-mesh connections
+    annotate_waypoint_transitions(out, owners, polyPath, world)
 
     return out
 end
@@ -2544,10 +2908,14 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
     -- which uses raw tile detail mesh data for accurate terrain heights (like wireframe)
     -- The old SoA-based height sampling here was less accurate and is no longer needed
 
-    -- Log first few waypoints for debug
+    -- Log first few waypoints for debug (including transitionType if present)
     for i = 1, math.min(5, #waypoints) do
         local wp = waypoints[i]
-        dbg(string.format("  WP[%d]: (%.1f, %.1f, %.1f)", i, wp.x, wp.y, wp.z or 0))
+        if wp.transitionType then
+            dbg(string.format("  WP[%d]: (%.1f, %.1f, %.1f) [%s]", i, wp.x, wp.y, wp.z or 0, wp.transitionType))
+        else
+            dbg(string.format("  WP[%d]: (%.1f, %.1f, %.1f)", i, wp.x, wp.y, wp.z or 0))
+        end
     end
 
     -- Total time and summary
