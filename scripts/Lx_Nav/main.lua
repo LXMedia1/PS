@@ -36,6 +36,7 @@ local menu_elements = {
     -- Test controls
     test_tree = core.menu.tree_node(),
     run_crosstile_test = core.menu.button("lx_nav_crosstile_btn"),
+    run_offmesh_test = core.menu.button("lx_nav_offmesh_test_btn"),
 }
 
 -- State
@@ -1604,6 +1605,282 @@ local function scan_all_tiles_for_player()
     Debug.log("Tile scan complete - see parse_log_tilescan.log")
 end
 
+-- ==========================================
+-- OFF-MESH PATHFINDING VALIDATION TEST
+-- ==========================================
+
+-- Test off-mesh pathfinding functionality
+-- Validates that paths use off-mesh connections and include transitionType metadata
+-- Can be run manually in-game via Tests menu
+local function test_offmesh_pathfinding()
+    local LOG_FILE = "parse_log_offmesh_test.log"
+    core.create_log_file(LOG_FILE)
+    local function log(msg) core.write_log_file(LOG_FILE, msg .. "\n") end
+
+    local ticks_per_ms = core.cpu_ticks_per_second() / 1000
+    local start_time = core.cpu_ticks()
+
+    log("==============================================")
+    log("    OFF-MESH PATHFINDING VALIDATION TEST")
+    log("==============================================")
+    log("")
+
+    -- Get player info
+    local player = core.object_manager.get_local_player()
+    if not player then
+        log("ERROR: No local player")
+        Debug.log("[OffMeshTest] ERROR: No local player")
+        return
+    end
+
+    local pos = player:get_position()
+    if not pos then
+        log("ERROR: No player position")
+        Debug.log("[OffMeshTest] ERROR: No player position")
+        return
+    end
+
+    local map_id = core.get_instance_id()
+    log(string.format("Player Position: (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z))
+    log(string.format("Map ID: %d", map_id))
+    log("")
+
+    -- Initialize pathfinding if needed
+    if not PathState.world or not PathState.query then
+        PathState.world = NavWorld.new()
+        PathState.query = NavQuery.new(PathState.world)
+    end
+
+    -- Make sure TileManager is synced
+    local mgr = Wireframe.get_tile_manager()
+    if mgr then
+        local all_tiles = mgr:get_all_tiles(map_id)
+        local tile_count = 0
+        for tileKey, rawTile in pairs(all_tiles) do
+            PathState.world:add_tile(tileKey, rawTile)
+            tile_count = tile_count + 1
+        end
+        log(string.format("Synced %d tiles to NavWorld", tile_count))
+        PathState.query:set_raw_tile_manager(mgr)
+    end
+
+    -- Test 1: Check if current area has off-mesh connections
+    log("")
+    log("=== TEST 1: Off-Mesh Connection Discovery ===")
+    log("")
+
+    local tiles = PathState.world:get_all_tiles()
+    local total_offmesh = 0
+    local offmesh_by_type = {
+        walk = 0,
+        jump = 0,
+        teleport = 0,
+        ladder = 0,
+        elevator = 0,
+        unknown = 0
+    }
+
+    for tileId, soa in pairs(tiles) do
+        if soa.offMeshCount and soa.offMeshCount > 0 then
+            total_offmesh = total_offmesh + soa.offMeshCount
+            log(string.format("  Tile %s: %d off-mesh connections", tileId, soa.offMeshCount))
+
+            -- Analyze connection types
+            if soa.offMeshUserId then
+                for i = 1, soa.offMeshCount do
+                    local userId = soa.offMeshUserId[i] or 0
+                    if userId == 0 then
+                        offmesh_by_type.walk = offmesh_by_type.walk + 1
+                    elseif userId == 1 then
+                        offmesh_by_type.jump = offmesh_by_type.jump + 1
+                    elseif userId == 2 then
+                        offmesh_by_type.teleport = offmesh_by_type.teleport + 1
+                    elseif userId == 3 then
+                        offmesh_by_type.ladder = offmesh_by_type.ladder + 1
+                    elseif userId == 4 then
+                        offmesh_by_type.elevator = offmesh_by_type.elevator + 1
+                    else
+                        offmesh_by_type.unknown = offmesh_by_type.unknown + 1
+                    end
+                end
+            end
+        end
+    end
+
+    log("")
+    log(string.format("Total off-mesh connections found: %d", total_offmesh))
+    log("By type:")
+    log(string.format("  WALK: %d", offmesh_by_type.walk))
+    log(string.format("  JUMP: %d", offmesh_by_type.jump))
+    log(string.format("  TELEPORT: %d", offmesh_by_type.teleport))
+    log(string.format("  LADDER: %d", offmesh_by_type.ladder))
+    log(string.format("  ELEVATOR: %d", offmesh_by_type.elevator))
+    log(string.format("  UNKNOWN: %d", offmesh_by_type.unknown))
+    log("")
+
+    if total_offmesh == 0 then
+        log("WARNING: No off-mesh connections in current area!")
+        log("For multi-level test, go to Undercity, Thunder Bluff, or a dungeon with elevators/jumps.")
+        log("")
+    end
+
+    -- Test 2: Pathfinding with off-mesh detection
+    log("=== TEST 2: Pathfinding Off-Mesh Detection ===")
+    log("")
+
+    -- Find a test path (look for off-mesh connections to use as targets)
+    local test_target = nil
+    local test_conn_type = nil
+
+    for tileId, soa in pairs(tiles) do
+        if soa.offMeshCount and soa.offMeshCount > 0 and soa.offMeshStartX then
+            for i = 1, soa.offMeshCount do
+                local startX = soa.offMeshStartX[i]
+                local startY = soa.offMeshStartY[i]
+                local startZ = soa.offMeshStartZ[i]
+                local endX = soa.offMeshEndX[i]
+                local endY = soa.offMeshEndY[i]
+                local endZ = soa.offMeshEndZ[i]
+
+                if startX and endX then
+                    -- Find one near the player
+                    local dist_to_start = math.sqrt((startX - pos.x)^2 + (startY - pos.y)^2)
+                    local dist_to_end = math.sqrt((endX - pos.x)^2 + (endY - pos.y)^2)
+
+                    if dist_to_start < 200 or dist_to_end < 200 then
+                        test_target = {
+                            startX = startX, startY = startY, startZ = startZ,
+                            endX = endX, endY = endY, endZ = endZ
+                        }
+                        test_conn_type = soa.offMeshUserId and soa.offMeshUserId[i] or 0
+                        log(string.format("Found nearby off-mesh connection (type %d):", test_conn_type))
+                        log(string.format("  Start: (%.2f, %.2f, %.2f)", startX, startY, startZ))
+                        log(string.format("  End: (%.2f, %.2f, %.2f)", endX, endY, endZ))
+                        log(string.format("  Distance to player: %.1f", math.min(dist_to_start, dist_to_end)))
+                        break
+                    end
+                end
+            end
+        end
+        if test_target then break end
+    end
+
+    if not test_target then
+        log("No nearby off-mesh connection found for pathfinding test.")
+        log("Manual test: Use 'Path to Click' on a destination across an off-mesh connection.")
+        log("")
+    else
+        -- Try to path to the off-mesh connection
+        log("")
+        log("Attempting pathfind across off-mesh connection...")
+
+        -- Path to the end of the off-mesh connection (requires traversing it)
+        local result = PathState.query:find_path(
+            pos.x, pos.y, pos.z,
+            test_target.endX, test_target.endY, test_target.endZ
+        )
+
+        if result.success then
+            log(string.format("Path found with %d waypoints!", #result.path))
+            log("")
+
+            -- Check for transition types in the path
+            local has_transition = false
+            local transition_counts = {}
+
+            for i, wp in ipairs(result.path) do
+                if wp.transitionType then
+                    has_transition = true
+                    transition_counts[wp.transitionType] = (transition_counts[wp.transitionType] or 0) + 1
+                    log(string.format("  Waypoint %d: (%.1f, %.1f, %.1f) [%s]",
+                        i, wp.x, wp.y, wp.z, wp.transitionType))
+                end
+            end
+
+            log("")
+            if has_transition then
+                log("SUCCESS: Path includes off-mesh transitions!")
+                for ttype, count in pairs(transition_counts) do
+                    log(string.format("  %s: %d waypoints", ttype, count))
+                end
+            else
+                log("NOTE: Path found but no transitionType metadata on waypoints.")
+                log("This may indicate:")
+                log("  1. Path doesn't cross off-mesh connection")
+                log("  2. Off-mesh connection annotation issue")
+            end
+        else
+            log("Path not found to off-mesh destination.")
+            log("This may indicate:")
+            log("  1. No valid route to destination")
+            log("  2. Off-mesh connection not integrated in A* graph")
+        end
+        log("")
+    end
+
+    -- Test 3: Multi-level area detection
+    log("=== TEST 3: Multi-Level Area Analysis ===")
+    log("")
+
+    -- Detect multi-level areas by checking Z variance in off-mesh connections
+    local max_z_diff = 0
+    local multi_level_conn = nil
+
+    for tileId, soa in pairs(tiles) do
+        if soa.offMeshCount and soa.offMeshCount > 0 and soa.offMeshStartZ and soa.offMeshEndZ then
+            for i = 1, soa.offMeshCount do
+                local startZ = soa.offMeshStartZ[i] or 0
+                local endZ = soa.offMeshEndZ[i] or 0
+                local z_diff = math.abs(endZ - startZ)
+
+                if z_diff > max_z_diff then
+                    max_z_diff = z_diff
+                    multi_level_conn = {
+                        tileId = tileId,
+                        index = i,
+                        startZ = startZ,
+                        endZ = endZ,
+                        userId = soa.offMeshUserId and soa.offMeshUserId[i] or 0
+                    }
+                end
+            end
+        end
+    end
+
+    if max_z_diff > 5 then
+        log(string.format("Multi-level connection detected! Z difference: %.1f", max_z_diff))
+        if multi_level_conn then
+            local type_names = {[0]="WALK", [1]="JUMP", [2]="TELEPORT", [3]="LADDER", [4]="ELEVATOR"}
+            local type_name = type_names[multi_level_conn.userId] or "UNKNOWN"
+            log(string.format("  Type: %s (userId=%d)", type_name, multi_level_conn.userId))
+            log(string.format("  From Z=%.1f to Z=%.1f", multi_level_conn.startZ, multi_level_conn.endZ))
+        end
+    else
+        log("No significant multi-level connections found in current area.")
+        log("For multi-level test, go to Undercity, Thunder Bluff, or a dungeon.")
+    end
+    log("")
+
+    -- Summary
+    local elapsed_ms = (core.cpu_ticks() - start_time) / ticks_per_ms
+    log("==============================================")
+    log("                 SUMMARY")
+    log("==============================================")
+    log(string.format("Test duration: %.2f ms", elapsed_ms))
+    log(string.format("Off-mesh connections in area: %d", total_offmesh))
+    log(string.format("Max Z difference (multi-level): %.1f", max_z_diff))
+    log("")
+    log("For full validation, manually test:")
+    log("  1. Go to Undercity (map 0) - test elevator navigation")
+    log("  2. Go to Thunder Bluff - test multi-level paths")
+    log("  3. Enable 'Path to Click' and click across levels")
+    log("  4. Verify path waypoints have transitionType field")
+    log("==============================================")
+
+    Debug.log(string.format("[OffMeshTest] Complete: %d connections, max Z diff %.1f (see parse_log_offmesh_test.log)",
+        total_offmesh, max_z_diff))
+end
+
 -- =========================
 -- Pathfinding Functions
 -- =========================
@@ -2002,6 +2279,10 @@ local function on_render_menu()
             if menu_elements.run_crosstile_test:render("Run Cross-Tile Test") then
                 Debug.log("[Menu] Running cross-tile connection test...")
                 test_cross_tile_connections()
+            end
+            if menu_elements.run_offmesh_test:render("Run Off-Mesh Test") then
+                Debug.log("[Menu] Running off-mesh pathfinding test...")
+                test_offmesh_pathfinding()
             end
         end)
     end)
