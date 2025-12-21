@@ -35,3 +35,6 @@ Research1.txt
 *.txt
 GEMINI.md
 *.py
+
+# Auto Claude data directory
+.auto-claude/

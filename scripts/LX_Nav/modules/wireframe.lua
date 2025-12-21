@@ -12,6 +12,10 @@ local vec3 = require("common/geometry/vector_3")
 local frame_count = 0
 local last_debug_time = 0
 
+-- Z offset diagnostic (runs once on first render)
+local z_diagnostic_done = false
+local Z_DIAG_LOG = "LX_Nav_z_offset.log"
+
 local Wireframe = {}
 
 -- TileManager instance (created on first use)
@@ -781,6 +785,97 @@ function Wireframe.render()
         bvnodes_drawn = bvnodes_drawn + draw_bvnodes(tile, player_pos)
     end
     Debug.perf_end("draw_all_tiles")
+
+    -- Run Z offset diagnostic once when tiles are loaded
+    if not z_diagnostic_done and polys_drawn > 0 then
+        z_diagnostic_done = true
+        core.create_log_file(Z_DIAG_LOG)
+
+        local function zlog(msg)
+            core.write_log_file(Z_DIAG_LOG, msg .. "\n")
+        end
+
+        zlog("=== Z OFFSET DIAGNOSTIC ===")
+        zlog(string.format("Player position: (%.2f, %.2f, %.2f)", player_pos.x, player_pos.y, player_pos.z))
+        zlog("")
+
+        -- Find nearest polygon and detail triangle to player
+        local nearestPoly = nil
+        local nearestTile = nil
+        local nearestDistSq = math.huge
+
+        for _, tile in pairs(tiles) do
+            for polyIdx, poly in ipairs(tile.polygons) do
+                if poly.center then
+                    local dx = poly.center.x - player_pos.x
+                    local dy = poly.center.y - player_pos.y
+                    local distSq = dx*dx + dy*dy
+                    if distSq < nearestDistSq then
+                        nearestDistSq = distSq
+                        nearestPoly = {poly = poly, idx = polyIdx}
+                        nearestTile = tile
+                    end
+                end
+            end
+        end
+
+        if nearestPoly and nearestTile then
+            local poly = nearestPoly.poly
+            zlog(string.format("Nearest polygon: %d (dist=%.2f)", nearestPoly.idx, math.sqrt(nearestDistSq)))
+            zlog(string.format("Polygon center: (%.2f, %.2f, %.2f)", poly.center.x, poly.center.y, poly.center.z))
+            zlog(string.format("Z offset (player - mesh center): %.2f", player_pos.z - poly.center.z))
+            zlog("")
+
+            -- Log all polygon vertices
+            zlog("Polygon vertices:")
+            for i = 1, poly.vertCount do
+                local v = poly.worldVerts[i]
+                if v then
+                    zlog(string.format("  [%d] (%.2f, %.2f, %.2f) raw_idx=%d",
+                        i, v.x, v.y, v.z, poly.verts[i]))
+                end
+            end
+            zlog("")
+
+            -- Log detail mesh info
+            local detail = nearestTile.detailMeshes and nearestTile.detailMeshes[nearestPoly.idx]
+            if detail then
+                zlog(string.format("Detail mesh: vertBase=%d, triBase=%d, vertCount=%d, triCount=%d",
+                    detail.vertBase, detail.triBase, detail.vertCount, detail.triCount))
+
+                -- Log detail vertices
+                if detail.vertCount > 0 and nearestTile.detailVerts then
+                    zlog("Detail vertices:")
+                    for i = 0, detail.vertCount - 1 do
+                        local idx = detail.vertBase + i + 1
+                        local v = nearestTile.detailVerts[idx]
+                        if v then
+                            zlog(string.format("  [%d] idx=%d (%.2f, %.2f, %.2f)",
+                                poly.vertCount + i, idx, v.x, v.y, v.z))
+                        end
+                    end
+                end
+                zlog("")
+            end
+
+            -- Log raw tile mesh header bounds
+            if nearestTile.meshHeader then
+                local mh = nearestTile.meshHeader
+                zlog("Tile mesh header (Recast coords):")
+                zlog(string.format("  bmin: (%.2f, %.2f, %.2f)", mh.bmin[1], mh.bmin[2], mh.bmin[3]))
+                zlog(string.format("  bmax: (%.2f, %.2f, %.2f)", mh.bmax[1], mh.bmax[2], mh.bmax[3]))
+                zlog("")
+                zlog("Converted to WoW (bmin):")
+                zlog(string.format("  x=%.2f (from recast z=%.2f)", mh.bmin[3], mh.bmin[3]))
+                zlog(string.format("  y=%.2f (from recast x=%.2f)", mh.bmin[1], mh.bmin[1]))
+                zlog(string.format("  z=%.2f (from recast y=%.2f)", mh.bmin[2], mh.bmin[2]))
+            end
+        end
+
+        zlog("")
+        zlog("=== END DIAGNOSTIC ===")
+        Debug.log("[Wireframe] Z offset diagnostic written to " .. Z_DIAG_LOG)
+    end
 
     -- Log debug info every 2 seconds
     frame_count = frame_count + 1

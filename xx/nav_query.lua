@@ -8,7 +8,24 @@ local NavQuery = {}
 NavQuery.__index = NavQuery
 
 -- TILE_STRIDE must exceed max polys per tile (typically ~15000)
-local TILE_STRIDE = 200000
+local TILE_STRIDE = 20000
+
+-- Transition filter: max vertical change per polygon transition (yards)
+-- STRICT: 1.0 yard = 3 feet max per transition. Most stairs are under this.
+-- If paths avoid valid stairs, increase to 1.5 or 2.0
+local MAX_CLIMB_Z = 2.0  -- Allow valid stair transitions (was 1.0, too restrictive)
+
+-- Vertical distance penalty multiplier for 3D cost/heuristic
+-- Higher = prefer flatter paths. 2.0 means 1 yard vertical = 2 yards horizontal cost.
+local WZ = 2.0
+
+-- Reference to Repair module (set via set_repair_module)
+local RepairModule = nil
+
+-- Set repair module reference (call from main.lua after loading Repair)
+function NavQuery.set_repair_module(repair)
+    RepairModule = repair
+end
 
 -- Create path debug log file at module load
 core.create_log_file("LX_Nav_path_debug.log")
@@ -27,15 +44,20 @@ local function dist3D(ax, ay, az, bx, by, bz)
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
--- 2D triangle area matching Detour's dtTriArea2D (cross product AC × AB)
--- Positive = C is RIGHT of line A→B
--- Negative = C is LEFT of line A→B
--- Zero = collinear
--- This matches Detour's convention for the funnel algorithm
+-- 3D distance heuristic with vertical penalty (admissible when WZ matches step_cost)
+local function dist3D_heuristic(ax, ay, az, bx, by, bz)
+    local dx, dy = bx - ax, by - ay
+    local dz = bz - az
+    return math.sqrt(dx * dx + dy * dy + (WZ * dz) * (WZ * dz))
+end
+
+-- Detour-compatible signed area (NEGATED cross product)
+-- With this convention: triArea2D < 0 means C is LEFT of line AB
+-- This is critical for the funnel algorithm to work correctly
 local function triArea2D(ax, ay, bx, by, cx, cy)
     local abx, aby = bx - ax, by - ay
     local acx, acy = cx - ax, cy - ay
-    return acx * aby - abx * acy  -- AC × AB (Detour convention)
+    return acx * aby - abx * acy
 end
 
 -- Check if two 2D points are equal within epsilon
@@ -43,45 +65,6 @@ local function veq2(ax, ay, bx, by, eps2)
     eps2 = eps2 or 1e-12
     local dx, dy = bx - ax, by - ay
     return (dx * dx + dy * dy) <= eps2
-end
-
--- DEBUG: Log file for portal ordering
-local ORDER_DEBUG_LOG = "LX_Nav_order_debug.log"
-local orderDebugLines = {}
-
--- Determine portal left/right using travel direction (WINDING-AGNOSTIC)
--- Given edge endpoints a,b and travel direction, returns (left, right)
--- Uses signed distance from travel line: point with larger left-distance is LEFT
-local function orderPortalLeftRight(ax, ay, az, bx, by, bz, dirX, dirY)
-    -- For each point, compute "leftness" = dirX*py - dirY*px
-    -- This is the signed perpendicular distance from the travel direction
-    -- Positive = left of travel, Negative = right of travel
-    local leftA = dirX * ay - dirY * ax
-    local leftB = dirX * by - dirY * bx
-
-    local logLine = string.format(
-        "  A=(%.1f,%.1f) B=(%.1f,%.1f) dir=(%.2f,%.2f) leftA=%.1f leftB=%.1f => ",
-        ax, ay, bx, by, dirX, dirY, leftA, leftB
-    )
-
-    if leftA > leftB then
-        -- a is more to the left
-        orderDebugLines[#orderDebugLines + 1] = logLine .. "A=left, B=right"
-        return {x = ax, y = ay, z = az}, {x = bx, y = by, z = bz}
-    else
-        -- b is more to the left
-        orderDebugLines[#orderDebugLines + 1] = logLine .. "B=left, A=right"
-        return {x = bx, y = by, z = bz}, {x = ax, y = ay, z = az}
-    end
-end
-
--- Function to flush order debug log
-local function flushOrderDebug()
-    if #orderDebugLines > 0 then
-        core.create_log_file(ORDER_DEBUG_LOG)
-        core.write_log_file(ORDER_DEBUG_LOG, table.concat(orderDebugLines, "\n"))
-        orderDebugLines = {}
-    end
 end
 
 -- Node ID encoding/decoding
@@ -98,128 +81,6 @@ end
 -- =========================
 -- Height Sampling Helpers
 -- =========================
-
--- Sample height from RAW tile for a specific polygon
--- This is the most accurate method - uses actual detail mesh data
-local function sample_height_from_raw_tile(rawTile, polyIndex, x, y)
-    if not rawTile or not rawTile.polygons then return nil end
-
-    local poly = rawTile.polygons[polyIndex]
-    if not poly then return nil end
-
-    local detail = rawTile.detailMeshes and rawTile.detailMeshes[polyIndex]
-    if not detail then
-        -- No detail mesh - use polygon center
-        return poly.center and poly.center.z or nil
-    end
-
-    -- Helper to get vertex for detail triangle (same as wireframe's get_detail_vertex)
-    local function get_raw_vert(vertexIndex)
-        local polyVertCount = poly.vertCount
-        if vertexIndex < polyVertCount then
-            -- Main polygon vertex
-            local mainIdx = poly.verts[vertexIndex + 1]  -- +1 for Lua 1-indexed
-            if mainIdx and rawTile.vertices[mainIdx + 1] then
-                return rawTile.vertices[mainIdx + 1]
-            end
-        else
-            -- Detail vertex
-            if rawTile.detailVerts then
-                local detailIdx = detail.vertBase + (vertexIndex - polyVertCount)
-                if rawTile.detailVerts[detailIdx + 1] then
-                    return rawTile.detailVerts[detailIdx + 1]
-                end
-            end
-        end
-        return nil
-    end
-
-    -- Check each detail triangle
-    local closestZ = nil
-    local closestDistSq = math.huge
-
-    local triCount = detail.triCount or 0
-    for t = 0, triCount - 1 do
-        local triIndex = detail.triBase + t + 1  -- +1 for Lua 1-indexed
-        local tri = rawTile.detailTris[triIndex]
-        if tri then
-            local v0 = get_raw_vert(tri.v0)
-            local v1 = get_raw_vert(tri.v1)
-            local v2 = get_raw_vert(tri.v2)
-
-            if v0 and v1 and v2 then
-                -- Point in triangle test (2D) using barycentric coords
-                local v1x, v1y = v1.x - v0.x, v1.y - v0.y
-                local v2x, v2y = v2.x - v0.x, v2.y - v0.y
-                local px, py = x - v0.x, y - v0.y
-                local d00 = v1x * v1x + v1y * v1y
-                local d01 = v1x * v2x + v1y * v2y
-                local d02 = v1x * px + v1y * py
-                local d11 = v2x * v2x + v2y * v2y
-                local d12 = v2x * px + v2y * py
-
-                local denom = d00 * d11 - d01 * d01
-                if math.abs(denom) > 1e-10 then
-                    local invDenom = 1 / denom
-                    local u = (d11 * d02 - d01 * d12) * invDenom
-                    local v = (d00 * d12 - d01 * d02) * invDenom
-
-                    if u >= 0 and v >= 0 and (u + v) <= 1 then
-                        -- Inside triangle - interpolate height
-                        local w = 1 - u - v
-                        return w * v0.z + u * v1.z + v * v2.z
-                    end
-                end
-
-                -- Track closest for fallback
-                local tcx = (v0.x + v1.x + v2.x) / 3
-                local tcy = (v0.y + v1.y + v2.y) / 3
-                local tcz = (v0.z + v1.z + v2.z) / 3
-                local distSq = (x - tcx) * (x - tcx) + (y - tcy) * (y - tcy)
-                if distSq < closestDistSq then
-                    closestDistSq = distSq
-                    closestZ = tcz
-                end
-            end
-        end
-    end
-
-    return closestZ
-end
-
--- Find polygon in raw tile that contains point (x, y) and sample height
--- Searches ALL polygons, not just corridor - handles wall avoidance pushing points outside corridor
-local function find_height_in_raw_tile(rawTile, x, y)
-    if not rawTile or not rawTile.polygons then return nil end
-
-    -- Search all polygons to find one containing (x, y)
-    for polyIndex, poly in ipairs(rawTile.polygons) do
-        if poly.worldVerts and poly.vertCount >= 3 then
-            -- Point-in-polygon test using ray casting
-            local inside = false
-            local n = poly.vertCount
-            local j = n
-            for i = 1, n do
-                local vi = poly.worldVerts[i]
-                local vj = poly.worldVerts[j]
-                if vi and vj then
-                    if ((vi.y > y) ~= (vj.y > y)) and
-                       (x < (vj.x - vi.x) * (y - vi.y) / (vj.y - vi.y) + vi.x) then
-                        inside = not inside
-                    end
-                end
-                j = i
-            end
-
-            if inside then
-                -- Found containing polygon - sample height from detail mesh
-                return sample_height_from_raw_tile(rawTile, polyIndex, x, y)
-            end
-        end
-    end
-
-    return nil  -- Not found in any polygon
-end
 
 -- Closest point on 2D line segment (returns closest point + squared distance)
 local function closest_pt_seg2d(px, py, ax, ay, bx, by)
@@ -403,14 +264,11 @@ end
 -- NavQuery Constructor
 -- =========================
 
-function NavQuery.new(world, rawTileManager)
+function NavQuery.new(world)
     local self = setmetatable({}, NavQuery)
 
     -- World reference (has tilesById: tileId -> SoA tile)
     self.world = world
-
-    -- Optional: raw tile manager for accurate height sampling (uses wireframe's tile data)
-    self.rawTileManager = rawTileManager
 
     -- A* state (reused across searches)
     self.heap = Heap.new()
@@ -424,9 +282,79 @@ function NavQuery.new(world, rawTileManager)
     return self
 end
 
--- Set the raw tile manager (can be set after construction)
-function NavQuery:set_raw_tile_manager(mgr)
-    self.rawTileManager = mgr
+-- =========================
+-- =========================
+-- Transition Filter
+-- =========================
+
+-- Check if a polygon transition is physically possible using EDGE vertices
+-- This is more accurate than polygon centers for detecting cliffs
+local _traverseLogCount = 0
+local function can_traverse_edge(curTile, curPoly, edgeIdx, neiTile, neiPoly)
+    if not curTile or not neiTile then return false end
+
+    -- Get the Z values of the edge vertices (the portal between polygons)
+    local base = (curPoly - 1) * 6
+    local nv = curTile.pVertCount[curPoly]
+
+    -- Edge vertices: edgeIdx and (edgeIdx % nv) + 1
+    local v1Idx = curTile.pVerts[base + edgeIdx]
+    local v2Idx = curTile.pVerts[base + (edgeIdx % nv) + 1]
+
+    if not v1Idx or not v2Idx or v1Idx == 0 or v2Idx == 0 then
+        -- Fallback to polygon center check
+        local z0 = curTile.pCz[curPoly]
+        local z1 = neiTile.pCz[neiPoly]
+        if not z0 or not z1 then return true end
+        return math.abs(z1 - z0) <= MAX_CLIMB_Z
+    end
+
+    -- Get edge Z values from current polygon
+    local edgeZ1 = curTile.vz[v1Idx] or curTile.pCz[curPoly]
+    local edgeZ2 = curTile.vz[v2Idx] or curTile.pCz[curPoly]
+    local curEdgeMinZ = math.min(edgeZ1, edgeZ2)
+    local curEdgeMaxZ = math.max(edgeZ1, edgeZ2)
+
+    -- Get neighbor polygon's Z range (min/max of all vertices)
+    local nBase = (neiPoly - 1) * 6
+    local nNv = neiTile.pVertCount[neiPoly]
+    local nMinZ, nMaxZ = math.huge, -math.huge
+    for i = 1, nNv do
+        local vIdx = neiTile.pVerts[nBase + i]
+        if vIdx and vIdx > 0 then
+            local vz = neiTile.vz[vIdx]
+            if vz then
+                nMinZ = math.min(nMinZ, vz)
+                nMaxZ = math.max(nMaxZ, vz)
+            end
+        end
+    end
+
+    if nMinZ == math.huge then
+        nMinZ = neiTile.pCz[neiPoly] or 0
+        nMaxZ = nMinZ
+    end
+
+    -- Check if the edge Z and neighbor Z have reasonable overlap
+    -- The gap between current edge Z and neighbor Z range should be small
+    local gap = 0
+    if curEdgeMaxZ < nMinZ then
+        gap = nMinZ - curEdgeMaxZ  -- Current edge is BELOW neighbor
+    elseif curEdgeMinZ > nMaxZ then
+        gap = curEdgeMinZ - nMaxZ  -- Current edge is ABOVE neighbor
+    end
+
+    if gap > MAX_CLIMB_Z then
+        if _traverseLogCount < 30 then
+            _traverseLogCount = _traverseLogCount + 1
+            core.write_log_file("LX_Nav.log", string.format(
+                "[TRAVERSE REJECT] poly %d edge(%d) z=[%.1f,%.1f] -> poly %d z=[%.1f,%.1f] gap=%.2f\n",
+                curPoly, edgeIdx, curEdgeMinZ, curEdgeMaxZ, neiPoly, nMinZ, nMaxZ, gap))
+        end
+        return false
+    end
+
+    return true
 end
 
 -- =========================
@@ -436,9 +364,7 @@ end
 local NavConstants = require("modules/nav_constants")
 
 -- Slope threshold for climbing (must match wireframe.lua)
-local MAX_WALKABLE_SLOPE_UP = 0.7    -- ~35 degrees up
-local MAX_WALKABLE_SLOPE_DOWN = 1.2  -- ~50 degrees down (steeper allowed going down)
-local MAX_WAYPOINT_SLOPE = 0.6       -- Max slope between waypoints (~31 degrees)
+local MAX_WALKABLE_SLOPE = 0.9
 
 -- Penalty multiplier for polygons near boundaries (walls/cliffs/edges)
 local BOUNDARY_PENALTY = 8.0  -- Strong preference for interior polygons
@@ -454,20 +380,20 @@ local function step_cost(tileA, polyA, tileB, polyB)
 
     -- Calculate slope (height change per XY distance)
     if xyDist > 0.1 then
-        local heightDiff = bz - az  -- Positive = going UP, Negative = going DOWN
+        local heightDiff = bz - az  -- Positive = going UP
         local slope = heightDiff / xyDist
 
-        -- Block paths that are too steep in either direction
-        if slope > MAX_WALKABLE_SLOPE_UP then
+        -- If slope is too steep going UP, block this path
+        if slope > MAX_WALKABLE_SLOPE then
             return 1e30  -- Can't climb this steep
         end
-        if slope < -MAX_WALKABLE_SLOPE_DOWN then
-            return 1e30  -- Can't descend this steep (cliff)
-        end
+        -- Going DOWN steep slopes is OK (gravity helps)
     end
 
-    -- Base cost: 2D distance
-    local c = xyDist
+    -- Base cost: 3D distance with vertical penalty
+    -- This penalizes vertical movement, making paths that "teleport" through floors expensive
+    local dz = bz - az
+    local c = math.sqrt(dx * dx + dy * dy + (WZ * dz) * (WZ * dz))
 
     -- Check polygon flags for walkability
     local flags = tileB.pFlags[polyB] or 0
@@ -527,8 +453,8 @@ end
 -- =========================
 
 -- Find polygon path from start to goal
--- Returns: array of nodeIds, or nil + error message
-function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, maxExpansions)
+-- Returns: array of nodeIds, bridgeTransitions table, or nil + error message
+function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, maxExpansions, dbgFunc)
     local world = self.world
     local heap = self.heap
     local seen, closed = self.seen, self.closed
@@ -538,11 +464,17 @@ function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, max
     self.searchId = self.searchId + 1
     local sid = self.searchId
 
-    maxExpansions = maxExpansions or 200000  -- Increased for large TILE_STRIDE
+    maxExpansions = maxExpansions or 20000
     heap:clear()
 
     local startNode = node_id(startTileId, startPoly)
     local goalNode = node_id(endTileId, endPoly)
+
+    -- Track expanded nodes for debug output
+    local expanded_list = {}
+
+    -- Track which transitions used bridges: bridgeEdge[childNode] = {fromX, fromY, fromZ, toX, toY, toZ}
+    local bridgeEdge = {}
 
     -- Get tiles
     local startTile = world.tilesById[startTileId]
@@ -552,46 +484,152 @@ function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, max
         return nil, "tiles_not_loaded"
     end
 
+    -- TRY BRIDGES FIRST: If a bridge connects near start to near goal, use it
+    -- Use a flag to prevent infinite recursion (bridge check calls find_poly_path)
+    if RepairModule and not self._skipBridgeCheck then
+        self._skipBridgeCheck = true  -- Prevent recursion
+
+        local bridges = RepairModule.get_bridges()
+        local staged = RepairModule.get_staged_bridges and RepairModule.get_staged_bridges() or {}
+        local all_bridges = {}
+        for _, b in ipairs(bridges) do all_bridges[#all_bridges + 1] = b end
+        for _, b in ipairs(staged) do all_bridges[#all_bridges + 1] = b end
+
+        for _, bridge in ipairs(all_bridges) do
+            local wps = bridge.waypoints
+            if wps and #wps >= 2 then
+                local first = wps[1]
+                local last = wps[#wps]
+
+                -- Check both directions
+                for _, dir in ipairs({"forward", "reverse"}) do
+                    local entryWp, exitWp, bridgeWaypoints
+                    if dir == "forward" then
+                        entryWp, exitWp, bridgeWaypoints = first, last, wps
+                    else
+                        entryWp, exitWp = last, first
+                        bridgeWaypoints = {}
+                        for i = #wps, 1, -1 do bridgeWaypoints[#bridgeWaypoints + 1] = wps[i] end
+                    end
+
+                    if entryWp.tileId and entryWp.polyIdx and exitWp.tileId and exitWp.polyIdx then
+                        -- Try: start -> bridge entry, bridge exit -> goal
+                        local path1, err1 = self:find_poly_path(startTileId, startPoly,
+                            entryWp.tileId, entryWp.polyIdx, 3000)
+                        if path1 and #path1 > 0 then
+                            local path2, err2 = self:find_poly_path(exitWp.tileId, exitWp.polyIdx,
+                                endTileId, endPoly, 3000)
+                            if path2 and #path2 > 0 then
+                                -- SUCCESS! Bridge provides a valid path
+                                self._skipBridgeCheck = false
+                                -- Return the bridge path directly
+                                local bridgePath = {}
+                                for _, n in ipairs(path1) do bridgePath[#bridgePath + 1] = n end
+                                -- Add bridge waypoints as special markers
+                                bridgePath._bridgeWaypoints = bridgeWaypoints
+                                bridgePath._bridgeExitPoly = path2[1]
+                                for i = 2, #path2 do bridgePath[#bridgePath + 1] = path2[i] end
+                                return bridgePath
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        self._skipBridgeCheck = false
+    end
+
     -- Initialize start node
     g[startNode] = 0
-    local h0 = dist2D(startTile.pCx[startPoly], startTile.pCy[startPoly],
-                      goalTile.pCx[endPoly], goalTile.pCy[endPoly])
+    local h0 = dist3D_heuristic(
+        startTile.pCx[startPoly], startTile.pCy[startPoly], startTile.pCz[startPoly],
+        goalTile.pCx[endPoly], goalTile.pCy[endPoly], goalTile.pCz[endPoly])
     f[startNode] = h0
     parent[startNode] = 0
     seen[startNode] = sid
 
     heap:push(startNode, f[startNode])
 
+    -- Debug: Log start/goal info
+    local startZ = startTile.pCz[startPoly] or 0
+    local goalZ = goalTile.pCz[endPoly] or 0
+    core.write_log_file("LX_Nav.log", string.format(
+        "[A* START] start=(%d,%d) z=%.1f goal=(%d,%d) z=%.1f\n",
+        startTileId, startPoly, startZ, endTileId, endPoly, goalZ))
+
     local expansions = 0
+    local _logged2032 = false
 
     while heap:size() > 0 do
         local cur = heap:pop()
+        local curTileId, curPoly = decode_node(cur)
+
+        -- Debug: Log when we reach bridge entry polygon 2032
+        if curPoly == 2032 and not _logged2032 then
+            _logged2032 = true
+            core.write_log_file("LX_Nav.log", string.format(
+                "[A*] REACHED bridge entry poly 2032! tile=%d\n", curTileId))
+        end
 
         -- Goal check
         if cur == goalNode then
-            -- Reconstruct path
+            -- Reconstruct path and bridge transitions
             local path = {}
+            local bridgeTransitions = {}  -- bridgeTransitions[pathIndex] = {from={x,y,z}, to={x,y,z}}
             local n = cur
             while n ~= 0 do
                 path[#path + 1] = n
+                -- Check if this node was reached via bridge
+                if bridgeEdge[n] then
+                    bridgeTransitions[#path] = bridgeEdge[n]
+                end
                 n = parent[n] or 0
             end
             -- Reverse path
             for i = 1, math.floor(#path / 2) do
                 path[i], path[#path - i + 1] = path[#path - i + 1], path[i]
             end
-            return path, nil, expansions
+            -- Fix bridge transition indices after reversal
+            local fixedBridgeTransitions = {}
+            for oldIdx, bridge in pairs(bridgeTransitions) do
+                local newIdx = #path - oldIdx + 1
+                fixedBridgeTransitions[newIdx] = bridge
+            end
+
+            -- Debug: log path with Z values to verify no floor-clipping
+            local logLines = {"[PATH DEBUG] Found path with " .. #path .. " nodes:"}
+            local prevZ = nil
+            for i = 1, math.min(#path, 15) do
+                local tid, pid = decode_node(path[i])
+                local t = world.tilesById[tid]
+                if t then
+                    local z = t.pCz[pid] or 0
+                    local zDelta = prevZ and string.format(" (dZ=%.1f)", z - prevZ) or ""
+                    local bridgeMarker = fixedBridgeTransitions[i] and " [BRIDGE]" or ""
+                    logLines[#logLines + 1] = string.format("  %d: tile=%d poly=%d z=%.1f%s%s",
+                        i, tid, pid, z, zDelta, bridgeMarker)
+                    prevZ = z
+                end
+            end
+            if #path > 15 then
+                logLines[#logLines + 1] = "  ... (" .. (#path - 15) .. " more nodes)"
+            end
+            core.write_log_file("LX_Nav.log", table.concat(logLines, "\n") .. "\n")
+
+            return path, nil, expansions, fixedBridgeTransitions
         end
 
         -- Mark as closed
         closed[cur] = sid
         expansions = expansions + 1
+        expanded_list[#expanded_list + 1] = cur
 
         if expansions > maxExpansions then
             return nil, "expansion_cap", expansions
         end
 
-        local curTileId, curPoly = decode_node(cur)
+        -- curTileId, curPoly already decoded at start of loop
         local curTile = world.tilesById[curTileId]
 
         if not curTile then
@@ -626,15 +664,31 @@ function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, max
                     if closed[nb] ~= sid then
                         local nTile = world.tilesById[nTileId]
 
+                        -- Skip if transition is physically impossible (large Z gap at edge)
+                        if nTile and not can_traverse_edge(curTile, curPoly, e, nTile, nPoly) then
+                            goto skip_neighbor
+                        end
+
+                        -- Skip if blacklisted (from Repair module - triangle level)
+                        if RepairModule and RepairModule.is_polygon_partially_blacklisted(nTileId, nPoly) then
+                            goto skip_neighbor
+                        end
+
                         if nTile then
+                            -- Also skip if polygon center is in a blacklist point radius
+                            if RepairModule and RepairModule.is_position_blacklisted(
+                                    nTile.pCx[nPoly], nTile.pCy[nPoly], nTile.pCz[nPoly]) then
+                                goto skip_neighbor
+                            end
                             local tentative = (g[cur] or 1e30) + step_cost(curTile, curPoly, nTile, nPoly)
 
                             if seen[nb] ~= sid or tentative < (g[nb] or 1e30) then
                                 parent[nb] = cur
                                 g[nb] = tentative
 
-                                local hx = dist2D(nTile.pCx[nPoly], nTile.pCy[nPoly],
-                                                 goalTile.pCx[endPoly], goalTile.pCy[endPoly])
+                                local hx = dist3D_heuristic(
+                                    nTile.pCx[nPoly], nTile.pCy[nPoly], nTile.pCz[nPoly],
+                                    goalTile.pCx[endPoly], goalTile.pCy[endPoly], goalTile.pCz[endPoly])
                                 local nf = tentative + hx
                                 f[nb] = nf
 
@@ -646,12 +700,156 @@ function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, max
                                 end
                             end
                         end
+                        ::skip_neighbor::
+                    end
+                end
+            end
+        end
+
+        -- Expand bridge neighbors (from Repair module)
+        -- Bridges are STRONGLY preferred - give them a massive cost bonus
+        if RepairModule then
+            local bridge_neighbors = RepairModule.get_bridge_neighbors(curTileId, curPoly)
+            if #bridge_neighbors > 0 then
+                core.write_log_file("LX_Nav.log", string.format(
+                    "[A*] Found %d bridge neighbors at poly %d\n", #bridge_neighbors, curPoly))
+            end
+            for _, bn in ipairs(bridge_neighbors) do
+                local nTileId = bn.tileId
+                local nPoly = bn.polyIdx
+                local nb = node_id(nTileId, nPoly)
+
+                if closed[nb] ~= sid then
+                    local nTile = world.tilesById[nTileId]
+                    if nTile then
+                        -- Bridge cost = actual traversal distance through all waypoints
+                        local bridgeCost = 0
+                        local wps = bn.bridgeWaypoints
+                        if wps and #wps >= 2 then
+                            for i = 1, #wps - 1 do
+                                local w1, w2 = wps[i], wps[i + 1]
+                                local dx = w2.x - w1.x
+                                local dy = w2.y - w1.y
+                                local dz = w2.z - w1.z
+                                bridgeCost = bridgeCost + math.sqrt(dx*dx + dy*dy + dz*dz)
+                            end
+                        else
+                            -- Fallback: straight-line 3D distance
+                            local dx = bn.x - bn.entryX
+                            local dy = bn.y - bn.entryY
+                            local dz = bn.z - bn.entryZ
+                            bridgeCost = math.sqrt(dx*dx + dy*dy + dz*dz)
+                        end
+                        local tentative = (g[cur] or 1e30) + bridgeCost
+
+                        if seen[nb] ~= sid or tentative < (g[nb] or 1e30) then
+                            parent[nb] = cur
+                            g[nb] = tentative
+
+                            -- Store bridge transition info (entry point on cur poly, exit point on neighbor poly)
+                            bridgeEdge[nb] = {
+                                from = {x = bn.entryX, y = bn.entryY, z = bn.entryZ},
+                                to = {x = bn.x, y = bn.y, z = bn.z}
+                            }
+
+                            local hx = dist3D_heuristic(bn.x, bn.y, bn.z,
+                                goalTile.pCx[endPoly], goalTile.pCy[endPoly], goalTile.pCz[endPoly])
+                            local nf = tentative + hx
+                            f[nb] = nf
+
+                            if seen[nb] ~= sid then
+                                seen[nb] = sid
+                                heap:push(nb, nf)
+                            else
+                                heap:decrease(nb, nf)
+                            end
+                        end
                     end
                 end
             end
         end
 
         ::continue::
+    end
+
+    -- Debug output for failed path searches
+    if dbgFunc then
+        dbgFunc("\n=== A* FAILURE DEBUG ===")
+        dbgFunc(string.format("Goal node: %d (tile=%d poly=%d)", goalNode, endTileId, endPoly))
+
+        if goalTile then
+            dbgFunc(string.format("Goal poly center: (%.1f, %.1f, %.1f)",
+                goalTile.pCx[endPoly], goalTile.pCy[endPoly], goalTile.pCz[endPoly]))
+        end
+
+        dbgFunc(string.format("Total expanded: %d", #expanded_list))
+
+        -- Show last 10 expanded polygons with their neighbor info
+        dbgFunc("\nLast 10 expanded nodes:")
+        local startIdx = math.max(1, #expanded_list - 9)
+        for i = startIdx, #expanded_list do
+            local nodeId = expanded_list[i]
+            local tileId, poly = decode_node(nodeId)
+            local tile = world.tilesById[tileId]
+            if tile then
+                local base = (poly - 1) * 6
+                local nv = tile.pVertCount[poly]
+                local neiInfo = {}
+                for e = 1, nv do
+                    local nei = tile.pNeis[base + e]
+                    if nei == 0 then
+                        neiInfo[#neiInfo + 1] = "WALL"
+                    elseif nei < 0x8000 then
+                        neiInfo[#neiInfo + 1] = string.format("int:%d", nei)
+                    else
+                        local extT = tile.extToTile[base + e] or 0
+                        local extP = tile.extToPoly[base + e] or 0
+                        if extT == 0 or extP == 0 then
+                            neiInfo[#neiInfo + 1] = "EXT:UNRESOLVED"
+                        else
+                            neiInfo[#neiInfo + 1] = string.format("ext:%d/%d", extT, extP)
+                        end
+                    end
+                end
+                dbgFunc(string.format("  [%d] tile=%d poly=%d Z=%.1f neis=[%s]",
+                    i, tileId, poly, tile.pCz[poly] or 0, table.concat(neiInfo, ", ")))
+            end
+        end
+
+        -- Check goal polygon connectivity
+        dbgFunc("\nGoal polygon neighbors:")
+        if goalTile then
+            local base = (endPoly - 1) * 6
+            local nv = goalTile.pVertCount[endPoly]
+            for e = 1, nv do
+                local nei = goalTile.pNeis[base + e]
+                if nei == 0 then
+                    dbgFunc(string.format("  edge %d: WALL", e))
+                elseif nei < 0x8000 then
+                    dbgFunc(string.format("  edge %d: internal poly %d", e, nei))
+                else
+                    local extT = goalTile.extToTile[base + e] or 0
+                    local extP = goalTile.extToPoly[base + e] or 0
+                    dbgFunc(string.format("  edge %d: external tile=%d poly=%d", e, extT, extP))
+                end
+            end
+        end
+
+        -- Check for off-mesh connections in the tile
+        if startTile and startTile.offMeshConnections and #startTile.offMeshConnections > 0 then
+            dbgFunc(string.format("\nOff-mesh connections in start tile: %d", #startTile.offMeshConnections))
+            for i, conn in ipairs(startTile.offMeshConnections) do
+                if conn then
+                    dbgFunc(string.format("  [%d] poly=%d start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) rad=%.1f bidir=%s",
+                        i, conn.poly or 0,
+                        conn.startX or 0, conn.startY or 0, conn.startZ or 0,
+                        conn.endX or 0, conn.endY or 0, conn.endZ or 0,
+                        conn.rad or 0, tostring(conn.flags == 1)))
+                end
+            end
+        else
+            dbgFunc("\nNo off-mesh connections in start tile")
+        end
     end
 
     return nil, "no_path", expansions
@@ -1133,9 +1331,8 @@ local function steerPointOnPortal(curr, goal, portalA, portalB, w)
 end
 
 -- Get portal edge endpoints between two adjacent polygons in the corridor
--- Uses travel direction to determine left/right ordering (winding-agnostic)
--- Returns: left {x,y,z}, right {x,y,z} or nil, nil if not found
-local function getPortalEndpoints(polyPath, fromIdx, toIdx, world, dirX, dirY)
+-- Returns: portalA {x,y}, portalB {x,y} or nil, nil if not found
+local function getPortalEndpoints(polyPath, fromIdx, toIdx, world)
     if fromIdx < 1 or toIdx > #polyPath then
         return nil, nil
     end
@@ -1152,7 +1349,7 @@ local function getPortalEndpoints(polyPath, fromIdx, toIdx, world, dirX, dirY)
     local nvA = tileA.pVertCount[polyA]
 
     -- Find the edge connecting polyA to polyB
-    local x0, y0, z0, x1, y1, z1
+    local x0, y0, x1, y1
 
     if tileAId == tileBId then
         -- Intra-tile: find edge where neis[e] == polyB
@@ -1160,8 +1357,8 @@ local function getPortalEndpoints(polyPath, fromIdx, toIdx, world, dirX, dirY)
             if tileA.pNeis[baseA + e] == polyB then
                 local v0 = tileA.pVerts[baseA + e]
                 local v1 = tileA.pVerts[baseA + (e % nvA) + 1]
-                x0, y0, z0 = tileA.vx[v0], tileA.vy[v0], tileA.vz[v0]
-                x1, y1, z1 = tileA.vx[v1], tileA.vy[v1], tileA.vz[v1]
+                x0, y0 = tileA.vx[v0], tileA.vy[v0]
+                x1, y1 = tileA.vx[v1], tileA.vy[v1]
                 break
             end
         end
@@ -1172,8 +1369,8 @@ local function getPortalEndpoints(polyPath, fromIdx, toIdx, world, dirX, dirY)
             if tileA.extToTile[idx] == tileBId and tileA.extToPoly[idx] == polyB then
                 local v0 = tileA.pVerts[baseA + e]
                 local v1 = tileA.pVerts[baseA + (e % nvA) + 1]
-                x0, y0, z0 = tileA.vx[v0], tileA.vy[v0], tileA.vz[v0]
-                x1, y1, z1 = tileA.vx[v1], tileA.vy[v1], tileA.vz[v1]
+                x0, y0 = tileA.vx[v0], tileA.vy[v0]
+                x1, y1 = tileA.vx[v1], tileA.vy[v1]
                 break
             end
         end
@@ -1183,141 +1380,7 @@ local function getPortalEndpoints(polyPath, fromIdx, toIdx, world, dirX, dirY)
         return nil, nil
     end
 
-    -- Use travel direction to determine left/right (winding-agnostic)
-    return orderPortalLeftRight(x0, y0, z0 or 0, x1, y1, z1 or 0, dirX, dirY)
-end
-
--- Build portal sequence for funnel algorithm
--- Returns: portalsL[], portalsR[] (left and right endpoints for each portal)
-local function getPathPortals(polyPath, startPos, endPos, world)
-    local portalsL = {}
-    local portalsR = {}
-
-    -- First portal: start position (apex)
-    portalsL[1] = {x = startPos.x, y = startPos.y, z = startPos.z}
-    portalsR[1] = {x = startPos.x, y = startPos.y, z = startPos.z}
-
-    -- Get portal for each pair of consecutive polygons
-    for i = 1, #polyPath - 1 do
-        -- Compute travel direction from poly i center to poly i+1 center
-        local tileIdA, polyA = decode_node(polyPath[i])
-        local tileIdB, polyB = decode_node(polyPath[i + 1])
-        local tileA = world.tilesById[tileIdA]
-        local tileB = world.tilesById[tileIdB]
-
-        if tileA and tileB then
-            local fromX, fromY = tileA.pCx[polyA], tileA.pCy[polyA]
-            local toX, toY = tileB.pCx[polyB], tileB.pCy[polyB]
-            local dirX, dirY = toX - fromX, toY - fromY
-
-            local left, right = getPortalEndpoints(polyPath, i, i + 1, world, dirX, dirY)
-            if left and right then
-                portalsL[#portalsL + 1] = left
-                portalsR[#portalsR + 1] = right
-            end
-        end
-    end
-
-    -- Last portal: end position
-    portalsL[#portalsL + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
-    portalsR[#portalsR + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
-
-    return portalsL, portalsR
-end
-
--- Funnel algorithm (string-pulling) for path smoothing
--- Takes portal left/right arrays, returns smoothed waypoint list
-local function stringPull(portalsL, portalsR)
-    local pts = {}
-    pts[1] = {x = portalsL[1].x, y = portalsL[1].y, z = portalsL[1].z}
-
-    local apexIndex = 1
-    local leftIndex = 1
-    local rightIndex = 1
-
-    local portalApex = portalsL[1]
-    local portalLeft = portalsL[1]
-    local portalRight = portalsR[1]
-
-    local i = 2
-    while i <= #portalsL do
-        local left = portalsL[i]
-        local right = portalsR[i]
-
-        -- Update right side of funnel
-        if triArea2D(portalApex.x, portalApex.y, portalRight.x, portalRight.y, right.x, right.y) <= 0 then
-            if veq2(portalApex.x, portalApex.y, portalRight.x, portalRight.y) or
-               triArea2D(portalApex.x, portalApex.y, portalLeft.x, portalLeft.y, right.x, right.y) > 0 then
-                -- Tighten right
-                portalRight = right
-                rightIndex = i
-            else
-                -- Right crosses left - emit left vertex and restart
-                pts[#pts + 1] = {x = portalLeft.x, y = portalLeft.y, z = portalLeft.z}
-                portalApex = portalLeft
-                apexIndex = leftIndex
-                portalLeft = portalApex
-                portalRight = portalApex
-                leftIndex = apexIndex
-                rightIndex = apexIndex
-                i = apexIndex  -- Restart from apex
-            end
-        end
-
-        -- Update left side of funnel
-        if triArea2D(portalApex.x, portalApex.y, portalLeft.x, portalLeft.y, left.x, left.y) >= 0 then
-            if veq2(portalApex.x, portalApex.y, portalLeft.x, portalLeft.y) or
-               triArea2D(portalApex.x, portalApex.y, portalRight.x, portalRight.y, left.x, left.y) < 0 then
-                -- Tighten left
-                portalLeft = left
-                leftIndex = i
-            else
-                -- Left crosses right - emit right vertex and restart
-                pts[#pts + 1] = {x = portalRight.x, y = portalRight.y, z = portalRight.z}
-                portalApex = portalRight
-                apexIndex = rightIndex
-                portalLeft = portalApex
-                portalRight = portalApex
-                leftIndex = apexIndex
-                rightIndex = apexIndex
-                i = apexIndex  -- Restart from apex
-            end
-        end
-
-        i = i + 1
-    end
-
-    -- Add end point
-    local lastL = portalsL[#portalsL]
-    pts[#pts + 1] = {x = lastL.x, y = lastL.y, z = lastL.z}
-
-    return pts
-end
-
--- Validate waypoint slopes - returns false if path has too-steep segments
--- This catches cliff transitions that A* missed (polygon center averaging)
-local function validateWaypointSlopes(waypoints)
-    if #waypoints < 2 then return true end
-
-    for i = 1, #waypoints - 1 do
-        local a = waypoints[i]
-        local b = waypoints[i + 1]
-
-        local dx, dy = b.x - a.x, b.y - a.y
-        local xyDist = math.sqrt(dx * dx + dy * dy)
-
-        if xyDist > 0.5 then  -- Only check if there's horizontal movement
-            local dz = (b.z or 0) - (a.z or 0)
-            local slope = math.abs(dz) / xyDist
-
-            if slope > MAX_WAYPOINT_SLOPE then
-                -- Too steep - this path goes over a cliff
-                return false, i, slope
-            end
-        end
-    end
-
-    return true
+    return {x = x0, y = y0}, {x = x1, y = y1}
 end
 
 -- Portal-based path straightening (research-based optimal algorithm)
@@ -1334,8 +1397,8 @@ local function straightenPathGreedy(polyPath, startPos, endPos, world)
     end
 
     if #polyPath == 0 then
-        logPathDebug("Empty polyPath, returning direct line to end")
-        return {{x = endPos.x, y = endPos.y, z = endPos.z}}
+        logPathDebug("Empty polyPath - no valid path found")
+        return nil  -- Return nil to indicate failure, NOT a straight line
     end
 
     if #polyPath == 1 then
@@ -1478,201 +1541,6 @@ local function findDistanceToWall(world, tileId, poly, px, py)
     return minDist, wallNx, wallNy
 end
 
--- =========================
--- Corridor Follower (Research-based human-like paths)
--- =========================
-
--- Configuration for corridor follower
-local CORRIDOR_CONFIG = {
-    step_length = 0.8,           -- Step size in yards (0.6-1.0 recommended)
-    desired_clearance = 1.5,     -- Desired distance from walls (yards) - reduced from 2.0
-    wall_query_radius = 3.0,     -- How far to look for walls - reduced from 4.0
-    repulsion_gain = 0.6,        -- Wall repulsion strength - reduced from 1.2 to prevent oscillation
-    lookahead_corners = 3,       -- How many corners ahead to consider
-    max_turn_per_step = 45,      -- Max heading change per step (degrees) - increased from 35
-    min_waypoint_spacing = 0.5,  -- Minimum distance between output waypoints
-}
-
--- Simple function to get portal midpoints along corridor (more reliable than visibility-based)
-local function getPortalMidpoints(polyPath, startPos, endPos, world)
-    local steerTargets = {}
-    local owners = {}
-
-    -- Start position
-    steerTargets[1] = {x = startPos.x, y = startPos.y, z = startPos.z}
-    owners[1] = 1
-
-    -- Get midpoint of each portal between consecutive polygons
-    for i = 1, #polyPath - 1 do
-        local portalA, portalB = getPortalEndpoints(polyPath, i, i + 1, world)
-        if portalA and portalB then
-            -- Use shrunk midpoint (away from walls)
-            local edgeX = portalB.x - portalA.x
-            local edgeY = portalB.y - portalA.y
-            local edgeLen = math.sqrt(edgeX * edgeX + edgeY * edgeY)
-
-            local midX, midY
-            if edgeLen > PORTAL_SHRINK * 2.5 then
-                -- Use midpoint of shrunk portal
-                local shrinkT = PORTAL_SHRINK / edgeLen
-                local shrinkA = {x = portalA.x + edgeX * shrinkT, y = portalA.y + edgeY * shrinkT}
-                local shrinkB = {x = portalB.x - edgeX * shrinkT, y = portalB.y - edgeY * shrinkT}
-                midX = (shrinkA.x + shrinkB.x) * 0.5
-                midY = (shrinkA.y + shrinkB.y) * 0.5
-            else
-                -- Portal too small, use simple midpoint
-                midX = (portalA.x + portalB.x) * 0.5
-                midY = (portalA.y + portalB.y) * 0.5
-            end
-
-            steerTargets[#steerTargets + 1] = {x = midX, y = midY, z = startPos.z}
-            owners[#owners + 1] = i + 1
-        end
-    end
-
-    -- End position
-    steerTargets[#steerTargets + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
-    owners[#owners + 1] = #polyPath
-
-    return steerTargets, owners
-end
-
--- Distance to nearest wall in corridor (Detour-style)
--- Returns: dist, normalX, normalY (normal points AWAY from wall)
-local function distance_to_wall_in_corridor(world, polyPath, curIndex, px, py, radius)
-    local bestDist = radius
-    local bestNx, bestNy = 0, 0
-
-    -- Examine current poly and a few ahead/behind in corridor
-    local fromIdx = math.max(1, curIndex - 2)
-    local toIdx = math.min(#polyPath, curIndex + 4)
-
-    for i = fromIdx, toIdx do
-        local tileId, poly = decode_node(polyPath[i])
-        local tile = world.tilesById[tileId]
-        if not tile then goto continue_poly end
-
-        local base = (poly - 1) * 6
-        local nv = tile.pVertCount[poly]
-
-        for e = 1, nv do
-            local nei = tile.pNeis[base + e]
-
-            -- Boundary edge: no neighbor (wall) or unresolved external
-            local isWall = (nei == 0)
-            if nei >= 0x8000 then
-                local extTile = tile.extToTile and tile.extToTile[base + e]
-                isWall = not extTile or extTile == 0
-            end
-
-            if isWall then
-                local vi = tile.pVerts[base + e]
-                local vj = tile.pVerts[base + (e % nv) + 1]
-                local ax, ay = tile.vx[vi], tile.vy[vi]
-                local bx, by = tile.vx[vj], tile.vy[vj]
-
-                -- Closest point on edge segment
-                local cx, cy, distSq = closest_pt_seg2d(px, py, ax, ay, bx, by)
-                local dist = math.sqrt(distSq)
-
-                if dist < bestDist and dist > 1e-6 then
-                    bestDist = dist
-                    -- Normal pointing from wall toward point (away from wall)
-                    bestNx = (px - cx) / dist
-                    bestNy = (py - cy) / dist
-                end
-            end
-        end
-
-        ::continue_poly::
-    end
-
-    return bestDist, bestNx, bestNy
-end
-
--- Find which corridor polygon contains a point (for corridor index tracking)
-local function find_corridor_index(world, polyPath, fromIdx, px, py, nq)
-    -- Search forward from current index
-    for i = fromIdx, math.min(#polyPath, fromIdx + 5) do
-        local tileId, poly = decode_node(polyPath[i])
-        local tile = world.tilesById[tileId]
-        if tile and nq:point_in_poly(tile, poly, px, py) then
-            return i
-        end
-    end
-    -- Search backward if not found
-    for i = fromIdx - 1, math.max(1, fromIdx - 3), -1 do
-        local tileId, poly = decode_node(polyPath[i])
-        local tile = world.tilesById[tileId]
-        if tile and nq:point_in_poly(tile, poly, px, py) then
-            return i
-        end
-    end
-    return fromIdx  -- Keep current if not found
-end
-
--- Corridor follower: generates smooth path using proper funnel algorithm
--- Uses getPathPortals + stringPull for optimal path smoothing
-local function corridor_follower(polyPath, startPos, endPos, world, nq)
-    if #polyPath == 0 then
-        return {{x = endPos.x, y = endPos.y, z = endPos.z}}, {1}
-    end
-
-    if #polyPath == 1 then
-        return {
-            {x = startPos.x, y = startPos.y, z = startPos.z},
-            {x = endPos.x, y = endPos.y, z = endPos.z}
-        }, {1, 1}
-    end
-
-    -- Build portal sequence with correct left/right ordering
-    local portalsL, portalsR = getPathPortals(polyPath, startPos, endPos, world)
-
-    -- Flush order debug log
-    flushOrderDebug()
-
-    -- TEST: Log portal data for verification
-    core.create_log_file("LX_Nav_funnel_test.log")
-    local testLog = string.format("=== FUNNEL TEST ===\nPolygons: %d, Portals: %d\n\n", #polyPath, #portalsL)
-    for i = 1, math.min(10, #portalsL) do
-        local l, r = portalsL[i], portalsR[i]
-        testLog = testLog .. string.format("Portal %d: L=(%.1f,%.1f) R=(%.1f,%.1f)\n",
-            i, l.x, l.y, r.x, r.y)
-    end
-
-    -- Run funnel algorithm (string-pulling)
-    local waypoints = stringPull(portalsL, portalsR)
-
-    -- Validate slopes - reject paths that go over cliffs
-    local valid, failIdx, failSlope = validateWaypointSlopes(waypoints)
-    if not valid then
-        testLog = testLog .. string.format("\nPATH REJECTED: Too steep at WP[%d]->WP[%d], slope=%.2f (max=%.2f)\n",
-            failIdx, failIdx + 1, failSlope, MAX_WAYPOINT_SLOPE)
-        core.write_log_file("LX_Nav_funnel_test.log", testLog)
-        return nil, nil  -- Path rejected due to cliff
-    end
-
-    -- Generate owners: map each waypoint to a polygon index
-    -- For funnel output, approximate based on position in corridor
-    local owners = {}
-    for i = 1, #waypoints do
-        -- Simple approximation: distribute evenly across corridor
-        owners[i] = math.max(1, math.min(#polyPath, math.ceil(i / #waypoints * #polyPath)))
-    end
-    owners[1] = 1  -- First waypoint is at start polygon
-    owners[#owners] = #polyPath  -- Last waypoint is at end polygon
-
-    testLog = testLog .. string.format("\nWaypoints: %d\n", #waypoints)
-    for i = 1, math.min(10, #waypoints) do
-        local wp = waypoints[i]
-        testLog = testLog .. string.format("  WP[%d]: (%.1f, %.1f, %.1f) owner=%d\n",
-            i, wp.x, wp.y, wp.z or 0, owners[i])
-    end
-    core.write_log_file("LX_Nav_funnel_test.log", testLog)
-
-    return waypoints, owners
-end
-
 -- Simple safe distance: just push away from the nearest boundary edge
 local function applySafeDistance(waypoints, polyPath, world)
     local MIN_DIST = 3.0  -- Minimum distance from walls
@@ -1805,26 +1673,18 @@ end
 -- Returns height if found, nil otherwise
 local function sample_detail_height(tile, poly, x, y)
     local detail = tile.detailMeshes and tile.detailMeshes[poly]
-    if not detail then
+    if not detail or detail.triCount == 0 then
         return nil
     end
 
-    local triCount = detail.triCount or 0
-    if triCount == 0 then
-        return nil
-    end
-
-    -- First pass: find exact triangle containing point
-    local closestZ = nil
-    local closestDistSq = math.huge
-
-    for t = 0, triCount - 1 do
+    -- Loop through detail triangles for this polygon
+    for t = 0, detail.triCount - 1 do
         local triIdx = (detail.triBase + t) * 4  -- Flattened array: each tri = 4 values
         local v0i = tile.detailTris[triIdx + 1]
         local v1i = tile.detailTris[triIdx + 2]
         local v2i = tile.detailTris[triIdx + 3]
 
-        if v0i ~= nil and v1i ~= nil and v2i ~= nil then
+        if v0i and v1i and v2i then
             local ax, ay, az = get_detail_vert(tile, poly, v0i)
             local bx, by, bz = get_detail_vert(tile, poly, v1i)
             local cx, cy, cz = get_detail_vert(tile, poly, v2i)
@@ -1832,146 +1692,196 @@ local function sample_detail_height(tile, poly, x, y)
             if ax and bx and cx then
                 local inside, wa, wb, wc = point_in_triangle_2d(x, y, ax, ay, bx, by, cx, cy)
                 if inside then
-                    -- Exact match - barycentric interpolation for Z
+                    -- Barycentric interpolation for Z
                     return wa * az + wb * bz + wc * cz
                 end
-
-                -- Track closest triangle center for fallback
-                local tcx = (ax + bx + cx) / 3
-                local tcy = (ay + by + cy) / 3
-                local tcz = (az + bz + cz) / 3
-                local distSq = (x - tcx) * (x - tcx) + (y - tcy) * (y - tcy)
-                if distSq < closestDistSq then
-                    closestDistSq = distSq
-                    closestZ = tcz
-                end
             end
         end
     end
 
-    -- Fallback: use closest triangle center height
-    return closestZ
+    return nil  -- Point not in any detail triangle
 end
 
--- Height debug log
-local HEIGHT_DEBUG_LOG = "LX_Nav_height.log"
-local function logHeight(msg)
-    core.write_log_file(HEIGHT_DEBUG_LOG, msg .. "\n")
-end
-
--- Fix waypoint Z heights by searching raw tile for containing polygon
--- Searches ALL polygons (not just corridor) since wall avoidance may push waypoints outside corridor
+-- Fix waypoint Z heights using polygon ownership
+-- First repairs ownership if waypoint was pushed into adjacent corridor poly,
+-- then samples height from detail mesh triangles (not just pCz)
 local function fixWaypointHeights(waypoints, owners, polyPath, world, startPos, nq)
     local prevZ = startPos.z
-    local MAX_Z_JUMP = 8.0  -- Maximum allowed Z change per waypoint
-
-    -- Initialize debug log
-    core.create_log_file(HEIGHT_DEBUG_LOG)
-    logHeight("=== fixWaypointHeights called ===")
-
-    -- Get raw tile manager for accurate height sampling (like wireframe uses)
-    local rawTileMgr = nq and nq.rawTileManager or nil
-    local mapId = rawTileMgr and core.get_instance_id() or nil
-
-    logHeight(string.format("rawTileMgr=%s, mapId=%s", rawTileMgr and "yes" or "nil", tostring(mapId)))
-
-    -- Get all loaded raw tiles for height queries
-    local rawTiles = {}
-    if rawTileMgr and mapId then
-        local allRawTiles = rawTileMgr:get_all_tiles(mapId)
-        if allRawTiles then
-            for _, tile in pairs(allRawTiles) do
-                rawTiles[#rawTiles + 1] = tile
-            end
-        end
-    end
-
-    -- Debug: log raw tile count and first tile info
-    logHeight(string.format("Raw tiles loaded: %d, waypoints: %d", #rawTiles, #waypoints))
-    if #rawTiles > 0 then
-        local t = rawTiles[1]
-        logHeight(string.format("  First tile: bounds=%s, polygons=%d",
-            t.boundsWow and "yes" or "no",
-            t.polygons and #t.polygons or 0))
-        if t.polygons and t.polygons[1] then
-            local p = t.polygons[1]
-            logHeight(string.format("  First poly: worldVerts=%s, vertCount=%d",
-                p.worldVerts and #p.worldVerts or "nil", p.vertCount or 0))
-        end
-    end
 
     for idx = 1, #waypoints do
         local wp = waypoints[idx]
-        local foundZ = nil
-        local searchResult = "no_tiles"
+        local owner = owners[idx] or 1
 
-        -- Search ALL raw tiles for the polygon containing this waypoint
-        for tileIdx, rawTile in ipairs(rawTiles) do
-            -- Check if waypoint is within tile bounds (quick reject)
-            if rawTile.boundsWow then
-                local b = rawTile.boundsWow
-                if wp.x >= b.min.x and wp.x <= b.max.x and
-                   wp.y >= b.min.y and wp.y <= b.max.y then
-                    -- Within tile bounds - search polygons
-                    local hz = find_height_in_raw_tile(rawTile, wp.x, wp.y)
-                    if hz then
-                        foundZ = hz
-                        searchResult = string.format("tile%d_poly", tileIdx)
-                        break
-                    else
-                        searchResult = "in_bounds_no_poly"
-                    end
+        if owner > 0 and owner <= #polyPath then
+            -- Repair ownership if safe distance pushed waypoint into adjacent corridor poly
+            owner = repairOwnerInCorridor(world, polyPath, owner, wp.x, wp.y, nq)
+            owners[idx] = owner  -- Update for debug logging
+
+            local tileId, poly = decode_node(polyPath[owner])
+            local tile = world.tilesById[tileId]
+
+            if tile then
+                -- Clamp waypoint XY to polygon boundary if still outside
+                local cx, cy = nq:clamp_to_poly(tileId, poly, wp.x, wp.y)
+                wp.x, wp.y = cx, cy
+
+                -- Sample height from detail mesh triangles (accurate for slopes)
+                local hz = sample_detail_height(tile, poly, wp.x, wp.y)
+
+                -- Fallback to polygon center Z if detail sampling fails
+                if not hz then
+                    hz = tile.pCz[poly]
+                end
+
+                if hz then
+                    wp.z = hz + 0.5  -- Small offset above ground
+                else
+                    wp.z = prevZ
                 end
             else
-                -- No bounds, just search (slower but works)
-                local hz = find_height_in_raw_tile(rawTile, wp.x, wp.y)
-                if hz then
-                    foundZ = hz
-                    searchResult = string.format("tile%d_noBounds", tileIdx)
-                    break
-                end
+                wp.z = prevZ
             end
+        else
+            -- End waypoint or unknown owner - use previous Z
+            wp.z = prevZ
         end
 
-        -- Fallback: use SoA tile polygon center if raw tile search failed
-        if not foundZ then
-            local owner = owners[idx] or 1
-            if owner >= 1 and owner <= #polyPath then
-                local node = polyPath[owner]
-                if node then
-                    local tileId, poly = decode_node(node)
-                    local tile = world.tilesById[tileId]
-                    if tile and tile.pCz and tile.pCz[poly] then
-                        foundZ = tile.pCz[poly]
+        prevZ = wp.z
+    end
+end
+
+-- =========================
+-- Bridge-aware Path Generation
+-- =========================
+
+-- Generate waypoints for a path that uses bridges
+-- For each segment: pathfind from current position TO the bridge entry, then jump to bridge exit
+function NavQuery:poly_path_to_waypoints_with_bridges(polyPath, startPos, endPos, bridgeTransitions)
+    local world = self.world
+    local finalPath = {}
+
+    -- Debug log
+    logPathDebug("=== BRIDGE-AWARE PATH GENERATION ===")
+    logPathDebug(string.format("polyPath length: %d", #polyPath))
+    logPathDebug(string.format("startPos: (%.1f, %.1f, %.1f)", startPos.x, startPos.y, startPos.z))
+    logPathDebug(string.format("endPos: (%.1f, %.1f, %.1f)", endPos.x, endPos.y, endPos.z))
+
+    -- Add start position
+    finalPath[#finalPath + 1] = {x = startPos.x, y = startPos.y, z = startPos.z}
+
+    -- Find bridge indices and sort them
+    local bridgeIndices = {}
+    for idx, _ in pairs(bridgeTransitions) do
+        bridgeIndices[#bridgeIndices + 1] = idx
+        local b = bridgeTransitions[idx]
+        logPathDebug(string.format("Bridge at polyPath[%d]: from=(%.1f,%.1f,%.1f) to=(%.1f,%.1f,%.1f)",
+            idx, b.from.x, b.from.y, b.from.z, b.to.x, b.to.y, b.to.z))
+    end
+    table.sort(bridgeIndices)
+
+    -- Process path segments between bridges
+    local segmentStart = 1
+    local currentPos = startPos
+
+    for _, bridgeIdx in ipairs(bridgeIndices) do
+        local bridge = bridgeTransitions[bridgeIdx]
+        if not bridge then goto continue_bridge end
+
+        logPathDebug(string.format("\n--- Processing bridge at index %d ---", bridgeIdx))
+
+        -- Segment is from segmentStart to bridgeIdx-1 (polygons before the bridge)
+        local segmentEnd = bridgeIdx - 1
+        logPathDebug(string.format("Segment: polyPath[%d..%d]", segmentStart, segmentEnd))
+
+        -- The destination for this segment is the BRIDGE ENTRY POINT (not polygon center!)
+        local bridgeEntry = {x = bridge.from.x, y = bridge.from.y, z = bridge.from.z}
+
+        if segmentEnd >= segmentStart then
+            -- Extract segment of polyPath
+            local segment = {}
+            for i = segmentStart, segmentEnd do
+                segment[#segment + 1] = polyPath[i]
+            end
+            logPathDebug(string.format("Segment has %d polygons", #segment))
+
+            -- Generate waypoints for this segment - destination is bridge entry!
+            if #segment >= 1 then
+                local clampedStart = {x = currentPos.x, y = currentPos.y, z = currentPos.z}
+                logPathDebug(string.format("Calling straightenPathGreedy: start=(%.1f,%.1f) end=(%.1f,%.1f)",
+                    clampedStart.x, clampedStart.y, bridgeEntry.x, bridgeEntry.y))
+
+                local segWaypoints, owners = straightenPathGreedy(segment, clampedStart, bridgeEntry, world)
+
+                logPathDebug(string.format("straightenPathGreedy returned %d waypoints", segWaypoints and #segWaypoints or 0))
+                if segWaypoints then
+                    for wi, wp in ipairs(segWaypoints) do
+                        logPathDebug(string.format("  wp[%d]: (%.1f, %.1f, %.1f)", wi, wp.x, wp.y, wp.z))
                     end
                 end
-            end
-        end
 
-        -- Apply continuity check
-        if foundZ then
-            local zDiff = math.abs(foundZ - prevZ)
-            if idx > 1 and zDiff > MAX_Z_JUMP then
-                -- Large jump - smooth transition
-                foundZ = prevZ + (foundZ - prevZ) * 0.3
+                -- Add segment waypoints (skip first if it duplicates current position)
+                for i = 2, #segWaypoints do
+                    finalPath[#finalPath + 1] = segWaypoints[i]
+                end
             end
-        end
-
-        -- Apply height with small offset above ground
-        if foundZ then
-            wp.z = foundZ + 0.5
-            prevZ = foundZ
         else
-            wp.z = prevZ + 0.5
+            logPathDebug("Segment is empty (segmentEnd < segmentStart)")
         end
 
-        -- Debug first few and a sample from middle
-        if idx <= 3 or idx == math.floor(#waypoints / 2) or idx == #waypoints then
-            logHeight(string.format("  Final WP[%d] (%.1f,%.1f,%.2f) foundZ=%s",
-                idx, wp.x, wp.y, wp.z, foundZ and string.format("%.2f", foundZ) or "SoA/prev"))
+        -- Add bridge entry point (in case segment smoothing didn't reach it exactly)
+        -- Only add if significantly different from last waypoint
+        local lastWp = finalPath[#finalPath]
+        local distToEntry = dist2D(lastWp.x, lastWp.y, bridgeEntry.x, bridgeEntry.y)
+        logPathDebug(string.format("Distance from last waypoint to bridge entry: %.1f", distToEntry))
+        if distToEntry > 1.0 then
+            finalPath[#finalPath + 1] = bridgeEntry
+            logPathDebug("Added bridge entry waypoint")
         end
+
+        -- Add bridge exit (where we land after crossing)
+        finalPath[#finalPath + 1] = {
+            x = bridge.to.x,
+            y = bridge.to.y,
+            z = bridge.to.z
+        }
+        logPathDebug(string.format("Added bridge exit: (%.1f, %.1f, %.1f)", bridge.to.x, bridge.to.y, bridge.to.z))
+        currentPos = bridge.to
+
+        -- Next segment starts at the polygon we entered via bridge
+        segmentStart = bridgeIdx
+
+        ::continue_bridge::
     end
-    logHeight("=== Height fix complete ===")
+
+    -- Process final segment (from last bridge to end destination)
+    if segmentStart <= #polyPath then
+        local segment = {}
+        for i = segmentStart, #polyPath do
+            segment[#segment + 1] = polyPath[i]
+        end
+
+        if #segment >= 1 then
+            local clampedStart = {x = currentPos.x, y = currentPos.y, z = currentPos.z}
+            local segWaypoints, owners = straightenPathGreedy(segment, clampedStart, endPos, world)
+
+            -- Add segment waypoints (skip first if it duplicates current position)
+            for i = 2, #segWaypoints do
+                finalPath[#finalPath + 1] = segWaypoints[i]
+            end
+        end
+
+        -- Ensure we reach the end position
+        local lastWp = finalPath[#finalPath]
+        local distToEnd = dist2D(lastWp.x, lastWp.y, endPos.x, endPos.y)
+        if distToEnd > 1.0 then
+            finalPath[#finalPath + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
+        end
+    else
+        -- No remaining segment, just add end
+        finalPath[#finalPath + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
+    end
+
+    return finalPath
 end
 
 -- =========================
@@ -1979,21 +1889,30 @@ end
 -- =========================
 
 -- Path mode options:
--- "corridor" = Corridor follower with wall avoidance (smooth, human-like paths)
--- "visibility" = Greedy visibility-based straightening
+-- "visibility" = Greedy visibility-based straightening (recommended)
 -- "funnel" = Traditional funnel algorithm
 -- "portal" = Portal midpoints (most waypoints, guaranteed safe)
-local PATH_MODE = "corridor"
+local PATH_MODE = "visibility"
 
 -- startPos: {x, y, z}
 -- endPos: {x, y, z}
+-- bridgeTransitions: table mapping polyPath index to {from={x,y,z}, to={x,y,z}} for bridge crossings
 -- Returns: array of {x, y, z} waypoints
-function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
+function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts, bridgeTransitions)
     local world = self.world
     maxPts = maxPts or 256
+    bridgeTransitions = bridgeTransitions or {}
 
     if not polyPath or #polyPath == 0 then
         return {{x = endPos.x, y = endPos.y, z = endPos.z}}
+    end
+
+    -- Check if path uses any bridges
+    local hasBridges = next(bridgeTransitions) ~= nil
+
+    -- If path uses bridges, use a simpler segment-by-segment approach
+    if hasBridges then
+        return self:poly_path_to_waypoints_with_bridges(polyPath, startPos, endPos, bridgeTransitions)
     end
 
     -- FIX #2c: Clamp start/end to their respective polygons (Detour requirement)
@@ -2001,20 +1920,6 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
     local tb, pb = decode_node(polyPath[#polyPath])
     local sx, sy = self:clamp_to_poly(ta, pa, startPos.x, startPos.y)
     local ex, ey = self:clamp_to_poly(tb, pb, endPos.x, endPos.y)
-
-    -- CORRIDOR MODE: Smooth, human-like paths with wall avoidance (research-based)
-    if PATH_MODE == "corridor" then
-        local clampedStart = {x = sx, y = sy, z = startPos.z}
-        local clampedEnd = {x = ex, y = ey, z = endPos.z}
-
-        -- Generate path using corridor follower (dense waypoints with wall avoidance)
-        local out, owners = corridor_follower(polyPath, clampedStart, clampedEnd, world, self)
-
-        -- Fix Z heights using polygon ownership
-        fixWaypointHeights(out, owners, polyPath, world, startPos, self)
-
-        return out
-    end
 
     -- VISIBILITY MODE: Greedy "look ahead as far as possible" with safe distance
     if PATH_MODE == "visibility" then
@@ -2496,8 +2401,18 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
     -- A* search
     dbg("--- A* SEARCH ---")
     local startTime = core.cpu_ticks()
-    local polyPath, err, expansions = self:find_poly_path(startTileId, startPoly, endTileId, endPoly)
+    local polyPath, err, expansions, bridgeTransitions = self:find_poly_path(startTileId, startPoly, endTileId, endPoly, nil, dbg)
     local astarTime = (core.cpu_ticks() - startTime) / (core.cpu_ticks_per_second() / 1000)
+
+    -- Log bridge transitions if any
+    if bridgeTransitions and next(bridgeTransitions) then
+        dbg(string.format("Bridge transitions found: %d", table.maxn and table.maxn(bridgeTransitions) or 0))
+        for idx, bridge in pairs(bridgeTransitions) do
+            dbg(string.format("  [%d] from=(%.1f,%.1f,%.1f) to=(%.1f,%.1f,%.1f)",
+                idx, bridge.from.x, bridge.from.y, bridge.from.z,
+                bridge.to.x, bridge.to.y, bridge.to.z))
+        end
+    end
 
     perf.astar = astarTime
     dbg(string.format("[PERF] A* search: %.2f ms (expansions: %d)",
@@ -2510,6 +2425,123 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
         elseif err == "no_path" then
             dbg(string.format("DIAGNOSIS: Exhausted all %d reachable nodes - no connectivity between start and end", expansions or 0))
         end
+
+        -- Try Repair bridge fallback: explicitly path TO bridge, then FROM bridge
+        dbg("--- REPAIR BRIDGE FALLBACK ---")
+        if RepairModule then
+            local bridges = RepairModule.get_bridges()
+            dbg(string.format("Checking %d saved Repair bridges", bridges and #bridges or 0))
+
+            for i, bridge in ipairs(bridges or {}) do
+                -- New multi-waypoint format: bridge.waypoints = [{tileId, polyIdx, x, y, z, isTri}, ...]
+                local wps = bridge.waypoints
+                if not wps or #wps < 2 then
+                    dbg(string.format("Bridge #%d: INVALID (no waypoints or <2)", i))
+                    goto continue_bridge
+                end
+
+                local firstWp = wps[1]
+                local lastWp = wps[#wps]
+
+                dbg(string.format("Bridge #%d: %d waypoints, from (%.1f,%.1f,%.1f) -> to (%.1f,%.1f,%.1f)",
+                    i, #wps, firstWp.x, firstWp.y, firstWp.z, lastWp.x, lastWp.y, lastWp.z))
+
+                -- Try both directions
+                for _, dir in ipairs({"forward", "reverse"}) do
+                    local entryWp, exitWp, bridgeWaypoints
+                    if dir == "forward" then
+                        entryWp = firstWp
+                        exitWp = lastWp
+                        bridgeWaypoints = wps
+                    else
+                        entryWp = lastWp
+                        exitWp = firstWp
+                        -- Reverse waypoints for path
+                        bridgeWaypoints = {}
+                        for j = #wps, 1, -1 do
+                            bridgeWaypoints[#bridgeWaypoints + 1] = wps[j]
+                        end
+                    end
+
+                    local entryTile = entryWp.tileId
+                    local entryPoly = entryWp.polyIdx
+                    local entryPos = {x = entryWp.x, y = entryWp.y, z = entryWp.z}
+                    local exitTile = exitWp.tileId
+                    local exitPoly = exitWp.polyIdx
+                    local exitPos = {x = exitWp.x, y = exitWp.y, z = exitWp.z}
+
+                    dbg(string.format("  Trying %s direction...", dir))
+
+                    -- Path from start to bridge entry
+                    local path1, err1 = self:find_poly_path(startTileId, startPoly, entryTile, entryPoly, 5000)
+                    if path1 and #path1 > 0 then
+                        dbg(string.format("    Start -> Bridge entry: SUCCESS (%d polys)", #path1))
+
+                        -- Path from bridge exit to end
+                        local path2, err2 = self:find_poly_path(exitTile, exitPoly, endTileId, endPoly, 5000)
+                        if path2 and #path2 > 0 then
+                            dbg(string.format("    Bridge exit -> End: SUCCESS (%d polys)", #path2))
+
+                            -- Build multi-segment path!
+                            local finalPath = {}
+
+                            -- Segment 1: Start to bridge entry
+                            local wp1 = self:poly_path_to_waypoints(path1,
+                                {x = startX, y = startY, z = startZ}, entryPos)
+                            for _, wp in ipairs(wp1) do
+                                finalPath[#finalPath + 1] = wp
+                            end
+
+                            -- Add ALL bridge waypoints (including intermediate ones)
+                            for j = 2, #bridgeWaypoints do  -- Skip first (already at entry)
+                                local bwp = bridgeWaypoints[j]
+                                finalPath[#finalPath + 1] = {x = bwp.x, y = bwp.y, z = bwp.z}
+                            end
+
+                            -- Segment 2: Bridge exit to end
+                            local wp2 = self:poly_path_to_waypoints(path2,
+                                exitPos, {x = endX, y = endY, z = endZ})
+                            -- Skip first point (duplicate of exit)
+                            for j = 2, #wp2 do
+                                finalPath[#finalPath + 1] = wp2[j]
+                            end
+
+                            dbg(string.format("REPAIR BRIDGE SUCCESS: %d total waypoints (bridge had %d pts)", #finalPath, #wps))
+                            write_path_debug(debugLines)
+
+                            return {
+                                success = true,
+                                path = finalPath,
+                                polyPath = nil,
+                                fallback = true,
+                                stats = {
+                                    polys = #path1 + #path2,
+                                    waypoints = #finalPath,
+                                    expansions = expansions,
+                                    astarMs = perf.astar,
+                                    fallbackType = "repair_bridge_" .. dir,
+                                }
+                            }
+                        else
+                            dbg(string.format("    Bridge exit -> End: FAILED (%s)", err2 or "unknown"))
+                        end
+                    else
+                        dbg(string.format("    Start -> Bridge entry: FAILED (%s)", err1 or "unknown"))
+                    end
+                end
+                ::continue_bridge::
+            end
+            dbg("No Repair bridge could connect start to end")
+        else
+            dbg("RepairModule not available")
+        end
+
+        -- DISABLED: Old gap-bridge system replaced by Repair module bridges
+        -- dbg("--- GAP BRIDGE FALLBACK ---")
+        -- local mapId = core.get_instance_id()
+        -- local bridgePath, bridgeDir = NavQuery.find_gap_bridge(mapId, startX, startY, startZ, endX, endY, endZ)
+        dbg("--- GAP BRIDGE FALLBACK (DISABLED) ---")
+
         write_path_debug(debugLines)
         return {success = false, error = err, expansions = expansions}
     end
@@ -2533,29 +2565,56 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
     local waypoints = self:poly_path_to_waypoints(
         polyPath,
         {x = startX, y = startY, z = startZ},
-        {x = endX, y = endY, z = endZ}
+        {x = endX, y = endY, z = endZ},
+        nil,  -- maxPts
+        bridgeTransitions
     )
     local funnelTime = (core.cpu_ticks() - startTime) / (core.cpu_ticks_per_second() / 1000)
 
     perf.funnel = funnelTime
     dbg(string.format("[PERF] Funnel: %.2f ms (%d waypoints)", funnelTime, #waypoints))
 
-    -- NOTE: Height sampling is now done inside poly_path_to_waypoints() via fixWaypointHeights()
-    -- which uses raw tile detail mesh data for accurate terrain heights (like wireframe)
-    -- The old SoA-based height sampling here was less accurate and is no longer needed
+    -- Sample heights for waypoints
+    local heightStart = core.cpu_ticks()
+    for i, wp in ipairs(waypoints) do
+        local tileId = world:get_tile_at(wp.x, wp.y)
+        if tileId then
+            local tile = world.tilesById[tileId]
+            if tile then
+                -- Try BVH lookup first (needs approximate Z for bounds check)
+                local poly = self:find_poly_at(tileId, wp.x, wp.y, wp.z or startZ)
 
-    -- Log first few waypoints for debug
-    for i = 1, math.min(5, #waypoints) do
-        local wp = waypoints[i]
+                -- Fallback to nearest polygon if BVH fails
+                if not poly then
+                    poly = self:find_nearest_poly(tileId, wp.x, wp.y, wp.z or startZ)
+                end
+
+                if poly then
+                    local h = self:get_height_at(tile, poly, wp.x, wp.y)
+                    if h then
+                        wp.z = h
+                    else
+                        -- Fallback: use polygon center Z
+                        wp.z = tile.pCz[poly]
+                    end
+                end
+            end
+        end
         dbg(string.format("  WP[%d]: (%.1f, %.1f, %.1f)", i, wp.x, wp.y, wp.z or 0))
     end
+    perf.heightSample = (core.cpu_ticks() - heightStart) / ticks_per_ms
+    dbg(string.format("[PERF] Height sampling: %.2f ms", perf.heightSample))
+
+    -- Start async floor snapping (non-blocking, processes over multiple frames)
+    start_floor_snapping(waypoints, startZ)
 
     -- Total time and summary
     perf.total = (core.cpu_ticks() - totalStart) / ticks_per_ms
     dbg("=== PERFORMANCE SUMMARY ===")
     dbg(string.format("[PERF] Polygon lookup: %.2f ms", perf.polyLookup))
     dbg(string.format("[PERF] A* search:      %.2f ms", perf.astar))
-    dbg(string.format("[PERF] Funnel+Height:  %.2f ms", perf.funnel))
+    dbg(string.format("[PERF] Funnel:         %.2f ms", perf.funnel))
+    dbg(string.format("[PERF] Height sample:  %.2f ms", perf.heightSample))
     dbg(string.format("[PERF] TOTAL:          %.2f ms", perf.total))
     dbg("=== SUCCESS ===")
     write_path_debug(debugLines)
@@ -2577,5 +2636,201 @@ end
 -- Export floor snapping functions for main.lua to call
 NavQuery.process_floor_snapping = process_floor_snapping
 NavQuery.is_floor_snapping_active = is_floor_snapping_active
+
+-- =========================
+-- Recorded Path Fallback System
+-- =========================
+-- When A* fails due to navmesh gaps, use manually recorded paths as fallback
+
+local RecordedPaths = {
+    paths = {},  -- Array of {mapId, startX, startY, startZ, endX, endY, endZ, waypoints}
+    match_radius = 5.0,  -- Match within 5 yards of start/end
+}
+
+-- Add a recorded path to the fallback system
+function NavQuery.add_recorded_path(mapId, waypoints)
+    if not waypoints or #waypoints < 2 then
+        return false, "Need at least 2 waypoints"
+    end
+
+    local first = waypoints[1]
+    local last = waypoints[#waypoints]
+
+    local path = {
+        mapId = mapId,
+        startX = first.x,
+        startY = first.y,
+        startZ = first.z,
+        endX = last.x,
+        endY = last.y,
+        endZ = last.z,
+        waypoints = waypoints,
+    }
+
+    -- Check if we already have a similar path
+    for i, existing in ipairs(RecordedPaths.paths) do
+        if existing.mapId == mapId then
+            local sd = dist3D(existing.startX, existing.startY, existing.startZ,
+                              path.startX, path.startY, path.startZ)
+            local ed = dist3D(existing.endX, existing.endY, existing.endZ,
+                              path.endX, path.endY, path.endZ)
+            if sd < RecordedPaths.match_radius and ed < RecordedPaths.match_radius then
+                -- Replace existing similar path
+                RecordedPaths.paths[i] = path
+                return true, "Replaced existing path"
+            end
+        end
+    end
+
+    table.insert(RecordedPaths.paths, path)
+    return true, string.format("Added path #%d (%d waypoints)", #RecordedPaths.paths, #waypoints)
+end
+
+-- Find a gap bridge based on Z-levels AND proximity
+-- Only use a bridge if start is near entry OR end is near exit
+function NavQuery.find_gap_bridge(mapId, startX, startY, startZ, endX, endY, endZ)
+    local query_z_diff = math.abs(startZ - endZ)
+    local PROXIMITY_RADIUS = 50  -- Must be within 50 yards of bridge entry/exit
+
+    for _, path in ipairs(RecordedPaths.paths) do
+        if path.mapId == mapId then
+            -- Check Z difference requirement
+            if query_z_diff > 10 then
+                -- Get bridge entry/exit
+                local entry = path.waypoints[1]
+                local exit = path.waypoints[#path.waypoints]
+
+                -- Check proximity: start near entry AND end near exit (forward)
+                local start_to_entry = dist2D(startX, startY, entry.x, entry.y)
+                local end_to_exit = dist2D(endX, endY, exit.x, exit.y)
+
+                -- Check proximity: start near exit AND end near entry (reverse)
+                local start_to_exit = dist2D(startX, startY, exit.x, exit.y)
+                local end_to_entry = dist2D(endX, endY, entry.x, entry.y)
+
+                local forward_ok = start_to_entry < PROXIMITY_RADIUS and end_to_exit < PROXIMITY_RADIUS
+                local reverse_ok = start_to_exit < PROXIMITY_RADIUS and end_to_entry < PROXIMITY_RADIUS
+
+                if forward_ok then
+                    return {waypoints = path.waypoints}, "forward"
+                elseif reverse_ok then
+                    local reversed = {}
+                    for i = #path.waypoints, 1, -1 do
+                        reversed[#reversed + 1] = path.waypoints[i]
+                    end
+                    return {waypoints = reversed}, "reverse"
+                end
+                -- Not close enough to this bridge, try next
+            end
+        end
+    end
+
+    return nil, "no_match"
+end
+
+-- Find a recorded path that connects start to end (or end to start, reversed)
+-- Uses Z-level matching: if start/end are on different floors, use recorded path to bridge
+function NavQuery.find_recorded_path(mapId, startX, startY, startZ, endX, endY, endZ)
+    local radius = RecordedPaths.match_radius
+    local z_tolerance = 10.0  -- Z must be within 10 yards of recorded path endpoint Z
+
+    for _, path in ipairs(RecordedPaths.paths) do
+        if path.mapId == mapId then
+            -- Check if start is near recorded start (2D) AND on same floor (Z)
+            local sd_2d = dist2D(path.startX, path.startY, startX, startY)
+            local sd_z = math.abs(path.startZ - startZ)
+
+            -- Check if end is on same floor as recorded end (Z)
+            local ed_z = math.abs(path.endZ - endZ)
+
+            -- Forward match: start near recorded start, end on same floor level as recorded end
+            if sd_2d < radius and sd_z < z_tolerance and ed_z < z_tolerance then
+                -- Forward match - return copy of waypoints
+                local result = {}
+                for i, wp in ipairs(path.waypoints) do
+                    result[i] = {x = wp.x, y = wp.y, z = wp.z}
+                end
+                return result, "forward"
+            end
+
+            -- Check reverse direction
+            local rs_2d = dist2D(path.endX, path.endY, startX, startY)
+            local rs_z = math.abs(path.endZ - startZ)
+            local re_z = math.abs(path.startZ - endZ)
+
+            -- Reverse match: start near recorded end, end on same floor level as recorded start
+            if rs_2d < radius and rs_z < z_tolerance and re_z < z_tolerance then
+                -- Reverse match - return reversed copy
+                local result = {}
+                for i = #path.waypoints, 1, -1 do
+                    local wp = path.waypoints[i]
+                    result[#result + 1] = {x = wp.x, y = wp.y, z = wp.z}
+                end
+                return result, "reverse"
+            end
+
+            -- Floor bridge match: if query crosses floors and recorded path bridges those floors
+            -- Check if query goes from high Z to low Z (or vice versa)
+            local query_z_diff = math.abs(startZ - endZ)
+            local path_z_diff = math.abs(path.startZ - path.endZ)
+
+            -- Both have significant Z difference (multi-floor)
+            if query_z_diff > 20 and path_z_diff > 20 then
+                -- Check if floors match (high->low or low->high)
+                local query_goes_down = startZ > endZ
+                local path_goes_down = path.startZ > path.endZ
+
+                if query_goes_down == path_goes_down then
+                    -- Same direction - use forward
+                    -- Just need start to be on same floor level
+                    if sd_z < z_tolerance then
+                        local result = {}
+                        for i, wp in ipairs(path.waypoints) do
+                            result[i] = {x = wp.x, y = wp.y, z = wp.z}
+                        end
+                        return result, "floor_bridge_forward"
+                    end
+                else
+                    -- Opposite direction - use reverse
+                    if rs_z < z_tolerance then
+                        local result = {}
+                        for i = #path.waypoints, 1, -1 do
+                            local wp = path.waypoints[i]
+                            result[#result + 1] = {x = wp.x, y = wp.y, z = wp.z}
+                        end
+                        return result, "floor_bridge_reverse"
+                    end
+                end
+            end
+        end
+    end
+
+    return nil, "no_match"
+end
+
+-- Get count of stored recorded paths
+function NavQuery.get_recorded_path_count()
+    return #RecordedPaths.paths
+end
+
+-- Clear all recorded paths
+function NavQuery.clear_recorded_paths()
+    RecordedPaths.paths = {}
+end
+
+-- Load the hardcoded gap bridge path (short path that connects the navmesh gap)
+function NavQuery.load_spiral_ramp_path()
+    -- This is the small gap in the spiral ramp where the navmesh is broken
+    -- Z goes from ~21.81 (upper edge) to ~20.16 (lower edge)
+    local gap_path = {
+        {x=1372.82, y=-4916.68, z=21.81},
+        {x=1372.26, y=-4915.52, z=21.46},
+        {x=1371.98, y=-4914.22, z=20.16},
+    }
+
+    local mapId = 1  -- Kalimdor
+    local ok, msg = NavQuery.add_recorded_path(mapId, gap_path)
+    return ok, msg
+end
 
 return NavQuery

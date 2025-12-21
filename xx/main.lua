@@ -9,6 +9,7 @@ local TileParser = require("modules/tile_parser")
 local Wireframe = require("modules/wireframe")
 local NavWorld = require("modules/nav_world")
 local NavQuery = require("modules/nav_query")
+local Repair = require("modules/repair")
 
 -- Graphics
 local color = require("common/color")
@@ -36,6 +37,35 @@ local menu_elements = {
     -- Test controls
     test_tree = core.menu.tree_node(),
     run_crosstile_test = core.menu.button("lx_nav_crosstile_btn"),
+    -- Path recorder
+    recorder_tree = core.menu.tree_node(),
+    recorder_toggle = core.menu.button("lx_nav_recorder_toggle"),
+    recorder_clear = core.menu.button("lx_nav_recorder_clear"),
+    recorder_save = core.menu.button("lx_nav_recorder_save"),
+    -- Repair tools
+    repair_tree = core.menu.tree_node(),
+    repair_enabled = core.menu.checkbox(false, "lx_nav_repair_enabled"),
+    repair_mode_connect = core.menu.button("lx_nav_repair_connect"),
+    repair_mode_blacklist_poly = core.menu.button("lx_nav_repair_bl_poly"),
+    repair_mode_blacklist_point = core.menu.button("lx_nav_repair_bl_point"),
+    repair_point_radius = core.menu.slider_int(1, 20, 5, "lx_nav_repair_radius"),
+    repair_blacklist_selected = core.menu.button("lx_nav_repair_blacklist"),
+    repair_clear_selection = core.menu.button("lx_nav_repair_clear_sel"),
+    repair_save_bridges = core.menu.button("lx_nav_repair_save_bridges"),
+    repair_cancel_staged = core.menu.button("lx_nav_repair_cancel_staged"),
+    repair_remove_last_staged = core.menu.button("lx_nav_repair_remove_last"),
+    repair_bridges_tree = core.menu.tree_node(),
+    repair_delete_bridge = core.menu.button("lx_nav_repair_del_bridge"),
+    -- New v3 elements
+    repair_cancel_recording = core.menu.button("lx_nav_repair_cancel_rec"),
+    repair_undo = core.menu.button("lx_nav_repair_undo"),
+    repair_tris_tree = core.menu.tree_node(),
+    repair_points_tree = core.menu.tree_node(),
+    repair_delete_tri = core.menu.button("lx_nav_repair_del_tri"),
+    repair_delete_point = core.menu.button("lx_nav_repair_del_point"),
+    repair_clear_bridges = core.menu.button("lx_nav_repair_clear_bridges"),
+    repair_clear_tris = core.menu.button("lx_nav_repair_clear_tris"),
+    repair_clear_points = core.menu.button("lx_nav_repair_clear_points"),
 }
 
 -- State
@@ -59,6 +89,17 @@ local PathState = {
 local click_to_path_mode = false
 local saved_safe_pos = nil  -- {x, y, z, map_id}
 local prev_mouse_down = false  -- For click edge detection
+local repair_prev_mouse = false  -- For repair click edge detection
+
+-- Path recorder state
+local PathRecorder = {
+    is_recording = false,
+    points = {},           -- Array of {x, y, z, time}
+    start_time = 0,
+    last_record_time = 0,
+    record_interval = 0.2, -- Record every 0.2 seconds
+    min_distance = 1.0,    -- Minimum distance between points (yards)
+}
 
 -- Test binary reading helpers
 local function test_binary_helpers()
@@ -1625,11 +1666,6 @@ local function sync_pathfinding()
     local mgr = Wireframe.get_tile_manager()
     if not mgr then return end
 
-    -- Ensure NavQuery has access to raw tiles for accurate height sampling
-    if PathState.query and not PathState.query.rawTileManager then
-        PathState.query:set_raw_tile_manager(mgr)
-    end
-
     local instanceId = core.get_instance_id()
     local added = PathState.world:sync_with_tile_manager(mgr, instanceId)
 
@@ -1671,7 +1707,7 @@ local function find_path_to(targetX, targetY, targetZ)
         PathState.targetPos = {x = targetX, y = targetY, z = targetZ}
 
         Debug.log(string.format("[Path] SUCCESS: %d polys, %d waypoints, %.2f ms A*, %.2f ms funnel",
-            result.stats.polys, result.stats.waypoints, result.stats.astarMs, result.stats.funnelMs))
+            result.stats.polys or 0, result.stats.waypoints or 0, result.stats.astarMs or 0, result.stats.funnelMs or 0))
         return true
     else
         Debug.log_error(string.format("[Path] FAILED: %s (expansions: %d)",
@@ -1777,6 +1813,18 @@ local function initialize()
     -- Initialize pathfinding system
     init_pathfinding()
 
+    -- Initialize repair module with pathfinding state
+    Repair.init(PathState)
+
+    -- Connect repair module to pathfinding (for blacklist/bridge support)
+    NavQuery.set_repair_module(Repair)
+
+    -- DISABLED: Old hardcoded fallback system - now using Repair module bridges instead
+    -- local ok, msg = NavQuery.load_spiral_ramp_path()
+    -- if ok then
+    --     Debug.log("[Path] Loaded spiral ramp fallback path: " .. msg)
+    -- end
+
     State.initialized = true
     Debug.log("LX_Nav initialized successfully")
     core.log("[LX_Nav] Loaded")
@@ -1831,6 +1879,94 @@ local function on_update()
         prev_mouse_down = core.input.is_key_pressed(0x01)
     end
 
+    -- Path recorder logic
+    if PathRecorder.is_recording then
+        local player = core.object_manager.get_local_player()
+        if player then
+            local pos = player:get_position()
+            local current_time = core.time()
+
+            -- Check if enough time has passed since last record
+            if current_time - PathRecorder.last_record_time >= PathRecorder.record_interval then
+                -- Check distance from last point
+                local should_record = true
+                if #PathRecorder.points > 0 then
+                    local last = PathRecorder.points[#PathRecorder.points]
+                    local dx = pos.x - last.x
+                    local dy = pos.y - last.y
+                    local dist = math.sqrt(dx*dx + dy*dy)
+                    if dist < PathRecorder.min_distance then
+                        should_record = false
+                    end
+                end
+
+                if should_record then
+                    PathRecorder.points[#PathRecorder.points + 1] = {
+                        x = pos.x,
+                        y = pos.y,
+                        z = pos.z,
+                        time = current_time - PathRecorder.start_time
+                    }
+                    PathRecorder.last_record_time = current_time
+                end
+            end
+        end
+    end
+
+    -- Repair mode click handling (v2 with triangle detection and mouse capture)
+    if Repair.is_enabled() then
+        local mouse_down = core.input.is_key_pressed(0x01)
+        local world_pos = core.graphics.get_cursor_world_position()
+
+        -- Update hover preview every frame
+        if world_pos then
+            Repair.update_hover(world_pos)
+        end
+
+        -- CRITICAL: Block camera movement while dragging
+        if Repair.is_dragging() then
+            core.graphics.capture_next_mouse_input()  -- Call every frame!
+        end
+
+        -- Check if cursor is over menu area (left side of screen) to prevent click passthrough
+        local cursor_screen = core.get_cursor_position()
+        local screen_size = core.graphics.get_screen_size()
+        local menu_width = 350  -- Approximate menu width
+        local cursor_in_menu = cursor_screen and cursor_screen.x < menu_width
+
+        if mouse_down then
+            if not repair_prev_mouse then
+                -- Click START - skip if cursor is over menu
+                if world_pos and not cursor_in_menu then
+                    local mode = Repair.get_mode()
+                    -- Only check for drag when in blacklist_point mode
+                    if mode == "blacklist_point" then
+                        local drag_target, drag_idx = Repair.get_blacklist_point_at(world_pos)
+                        if drag_target then
+                            Repair.set_selected_point_idx(drag_idx)
+                            Repair.start_drag(drag_target)
+                        else
+                            Repair.handle_click(world_pos)
+                        end
+                    else
+                        Repair.handle_click(world_pos)
+                    end
+                end
+            elseif Repair.is_dragging() then
+                -- DRAGGING - update position
+                if world_pos then
+                    Repair.update_drag_position(world_pos)
+                end
+            end
+        else
+            -- Mouse released
+            if Repair.is_dragging() then
+                Repair.end_drag()
+            end
+        end
+        repair_prev_mouse = mouse_down
+    end
+
     -- Process extraction coroutine (frame-budgeted)
     if ExtractState.running then
         process_extraction()
@@ -1876,10 +2012,47 @@ local function on_render()
         end
     end
 
+    -- Render repair highlights (selected, bridged, blacklisted)
+    Repair.render()
+
     -- Draw path if enabled
     local path_enabled = menu_elements.path_enabled:get_state()
     if path_enabled then
         draw_path()
+    end
+
+    -- Draw recorded path points
+    if #PathRecorder.points > 0 then
+        local color_point = require("common/color").new(255, 128, 0, 255)     -- Orange for points
+        local color_line = require("common/color").new(255, 200, 0, 200)       -- Yellow for lines
+        local color_recording = require("common/color").new(255, 0, 0, 255)    -- Red for recording indicator
+
+        for i, pt in ipairs(PathRecorder.points) do
+            local screen = core.graphics.w2s(require("common/geometry/vector_3").new(pt.x, pt.y, pt.z))
+            if screen and screen.x > 0 and screen.y > 0 then
+                -- Draw point circle
+                core.graphics.circle_2d_filled(screen, 4, color_point)
+
+                -- Draw line to next point
+                if i < #PathRecorder.points then
+                    local next_pt = PathRecorder.points[i + 1]
+                    local next_screen = core.graphics.w2s(require("common/geometry/vector_3").new(next_pt.x, next_pt.y, next_pt.z))
+                    if next_screen and next_screen.x > 0 and next_screen.y > 0 then
+                        core.graphics.line_2d(screen, next_screen, color_line, 2)
+                    end
+                end
+            end
+        end
+
+        -- Show recording indicator
+        if PathRecorder.is_recording then
+            local screen_size = core.graphics.get_screen_size()
+            local indicator_pos = require("common/geometry/vector_2").new(screen_size.x - 120, 50)
+            core.graphics.circle_2d_filled(indicator_pos, 8, color_recording)
+            core.graphics.text_2d("REC", require("common/geometry/vector_2").new(screen_size.x - 100, 42), 16, color_recording, false)
+            core.graphics.text_2d(string.format("%d pts", #PathRecorder.points),
+                require("common/geometry/vector_2").new(screen_size.x - 100, 58), 12, color_point, false)
+        end
     end
 
     -- Show debug stats if enabled
@@ -1911,37 +2084,6 @@ local function on_render()
                 status.section, status.progress, status.total, pct))
         end
 
-        -- Z offset diagnostic: compare player Z with nearest mesh polygon
-        local player = core.object_manager.get_local_player()
-        if player and PathState.world then
-            local pos = player:get_position()
-            if pos then
-                -- Find nearest polygon center to player
-                local nearestZ = nil
-                local nearestDist = math.huge
-                local tiles = PathState.world:get_all_tiles()
-                for _, soa in pairs(tiles) do
-                    if soa.pCx and soa.pCy and soa.pCz then
-                        for p = 1, soa.polyCount do
-                            local cx, cy, cz = soa.pCx[p], soa.pCy[p], soa.pCz[p]
-                            if cx and cy and cz then
-                                local dx, dy = cx - pos.x, cy - pos.y
-                                local distSq = dx*dx + dy*dy
-                                if distSq < nearestDist then
-                                    nearestDist = distSq
-                                    nearestZ = cz
-                                end
-                            end
-                        end
-                    end
-                end
-                if nearestZ and nearestDist < 100 then  -- Within 10 yards
-                    local zOffset = pos.z - nearestZ
-                    table.insert(extra, string.format("Z: player=%.2f mesh=%.2f diff=%.2f", pos.z, nearestZ, zOffset))
-                end
-            end
-        end
-
         Debug.render_stats(extra)
     end
 end
@@ -1958,6 +2100,167 @@ local function on_render_menu()
             menu_elements.wireframe_range:render("Draw Range (yards)")
             menu_elements.wireframe_bvnodes:render("Show BVNodes (spatial tree)")
             -- Polygon link arrows now follow wireframe automatically
+
+            -- Repair tools submenu (v3 - multi-waypoint bridges, undo, delete UI)
+            menu_elements.repair_tree:render("Repair Tools", function()
+                -- Enable toggle
+                menu_elements.repair_enabled:render("Enable Repair Mode")
+                Repair.set_enabled(menu_elements.repair_enabled:get_state())
+
+                if Repair.is_enabled() then
+                    local mode = Repair.get_mode()
+
+                    -- === MODE SELECTION (toggle on/off) ===
+                    local bridge_label = mode == "bridge" and "Bridge Mode [ACTIVE]" or "Bridge Mode (K+click)"
+                    if menu_elements.repair_mode_connect:render(bridge_label) then
+                        Repair.set_mode(mode == "bridge" and nil or "bridge")
+                    end
+
+                    local bl_tri_label = mode == "blacklist_tri" and "Block Triangle [ACTIVE]" or "Block Triangle"
+                    if menu_elements.repair_mode_blacklist_poly:render(bl_tri_label) then
+                        Repair.set_mode(mode == "blacklist_tri" and nil or "blacklist_tri")
+                    end
+
+                    local bl_point_label = mode == "blacklist_point" and "Block Area [ACTIVE]" or "Block Area (radius)"
+                    if menu_elements.repair_mode_blacklist_point:render(bl_point_label) then
+                        Repair.set_mode(mode == "blacklist_point" and nil or "blacklist_point")
+                    end
+
+                    -- === RADIUS SLIDER (right after Block Area, when point is selected) ===
+                    local sel_idx = Repair.get_selected_point_idx()
+                    if sel_idx then
+                        local points = Repair.get_blacklist_points()
+                        if points[sel_idx] then
+                            menu_elements.repair_point_radius:render("Radius")
+                            local new_radius = menu_elements.repair_point_radius:get()
+                            if new_radius ~= points[sel_idx].radius then
+                                Repair.set_point_radius(sel_idx, new_radius)
+                            end
+                        end
+                    end
+
+                    -- === RECORDING STATE (bridge mode) ===
+                    if Repair.is_recording() then
+                        local wps = Repair.get_recording_waypoints()
+                        if menu_elements.repair_cancel_recording:render(string.format("Cancel Recording (%d pts)", #wps)) then
+                            Repair.cancel_recording()
+                        end
+                    end
+
+                    -- === STAGED BRIDGES ===
+                    local staged_count = Repair.get_staged_count()
+                    if staged_count > 0 then
+                        if menu_elements.repair_save_bridges:render(string.format("Save Bridges (%d)", staged_count)) then
+                            Repair.save_staged_bridges()
+                        end
+                        if menu_elements.repair_cancel_staged:render("Cancel All Staged") then
+                            Repair.clear_staged_bridges()
+                        end
+                        if menu_elements.repair_remove_last_staged:render("Remove Last Staged") then
+                            Repair.remove_staged_bridge(staged_count)
+                        end
+                    end
+
+                    -- === UNDO ===
+                    if Repair.has_undo_action() then
+                        local action_type = Repair.get_last_action_type()
+                        local undo_label = "Undo"
+                        if action_type == "add_bridge" then
+                            undo_label = "Undo (bridge)"
+                        elseif action_type == "add_blacklist_tri" then
+                            undo_label = "Undo (blocked tri)"
+                        elseif action_type == "add_blacklist_point" then
+                            undo_label = "Undo (blocked area)"
+                        end
+                        if menu_elements.repair_undo:render(undo_label) then
+                            Repair.undo_last_action()
+                        end
+                    end
+
+                    -- === SAVED DATA TREES ===
+                    local bridges = Repair.get_bridges()
+                    local bl_tris = Repair.get_blacklist_tris()
+                    local bl_points = Repair.get_blacklist_points()
+
+                    -- Bridges tree (click to preview/highlight, click again to delete)
+                    if #bridges > 0 then
+                        local preview_bridge = Repair.get_preview_bridge_idx()
+                        menu_elements.repair_bridges_tree:render(string.format("Bridges (%d)", #bridges), function()
+                            for i, bridge in ipairs(bridges) do
+                                local wps = bridge.waypoints
+                                if wps and #wps >= 2 then
+                                    local is_selected = (i == preview_bridge)
+                                    local label = is_selected
+                                        and string.format("[DELETE] #%d (%d pts)", i, #wps)
+                                        or string.format("Select #%d (%d pts)", i, #wps)
+                                    if menu_elements.repair_delete_bridge:render(label .. "##bdel" .. i) then
+                                        if is_selected then
+                                            Repair.remove_bridge(i)
+                                            Repair.clear_all_previews()
+                                        else
+                                            Repair.set_preview_bridge_idx(i)
+                                        end
+                                    end
+                                end
+                            end
+                            if menu_elements.repair_clear_bridges:render("Clear All Bridges") then
+                                Repair.clear_all_bridges()
+                                Repair.clear_all_previews()
+                            end
+                        end)
+                    end
+
+                    -- Blocked triangles tree (click to preview, click again to delete)
+                    if #bl_tris > 0 then
+                        local preview_tri = Repair.get_preview_tri_idx()
+                        menu_elements.repair_tris_tree:render(string.format("Blocked Tris (%d)", #bl_tris), function()
+                            for i, bl in ipairs(bl_tris) do
+                                local is_selected = (i == preview_tri)
+                                local label = is_selected
+                                    and string.format("[DELETE] T:%d P:%d", bl.tileId, bl.polyIdx)
+                                    or string.format("Select T:%d P:%d Tri:%d", bl.tileId, bl.polyIdx, bl.triangleIdx)
+                                if menu_elements.repair_delete_tri:render(label .. "##tdel" .. i) then
+                                    if is_selected then
+                                        Repair.remove_blacklist_tri(i)
+                                        Repair.clear_all_previews()
+                                    else
+                                        Repair.set_preview_tri_idx(i)
+                                    end
+                                end
+                            end
+                            if menu_elements.repair_clear_tris:render("Clear All Blocked Tris") then
+                                Repair.clear_all_blacklist_tris()
+                                Repair.clear_all_previews()
+                            end
+                        end)
+                    end
+
+                    -- Blocked areas tree (click to preview, click again to delete)
+                    if #bl_points > 0 then
+                        local preview_point = Repair.get_preview_point_idx()
+                        menu_elements.repair_points_tree:render(string.format("Blocked Areas (%d)", #bl_points), function()
+                            for i, pt in ipairs(bl_points) do
+                                local is_selected = (i == preview_point)
+                                local label = is_selected
+                                    and string.format("[DELETE] (%.0f,%.0f) R=%d", pt.x, pt.y, pt.radius)
+                                    or string.format("Select (%.0f,%.0f) R=%d", pt.x, pt.y, pt.radius)
+                                if menu_elements.repair_delete_point:render(label .. "##pdel" .. i) then
+                                    if is_selected then
+                                        Repair.remove_blacklist_point(i)
+                                        Repair.clear_all_previews()
+                                    else
+                                        Repair.set_preview_point_idx(i)
+                                    end
+                                end
+                            end
+                            if menu_elements.repair_clear_points:render("Clear All Blocked Areas") then
+                                Repair.clear_all_blacklist_points()
+                                Repair.clear_all_previews()
+                            end
+                        end)
+                    end
+                end
+            end)
         end)
 
         -- Pathfinding submenu
@@ -1994,6 +2297,60 @@ local function on_render_menu()
 
             if menu_elements.path_clear:render("Clear Path") then
                 clear_path()
+            end
+        end)
+
+        -- Path Recorder submenu
+        menu_elements.recorder_tree:render("Path Recorder", function()
+            local toggle_label = PathRecorder.is_recording and "Stop Recording [REC]" or "Start Recording"
+            if menu_elements.recorder_toggle:render(toggle_label) then
+                PathRecorder.is_recording = not PathRecorder.is_recording
+                if PathRecorder.is_recording then
+                    PathRecorder.start_time = core.time()
+                    PathRecorder.last_record_time = 0
+                    Debug.log("[Recorder] Recording started")
+                else
+                    Debug.log(string.format("[Recorder] Recording stopped (%d points)", #PathRecorder.points))
+                end
+            end
+
+            if menu_elements.recorder_clear:render("Clear Points") then
+                PathRecorder.points = {}
+                Debug.log("[Recorder] Points cleared")
+            end
+
+            local save_label = string.format("Save Path (%d pts)", #PathRecorder.points)
+            if menu_elements.recorder_save:render(save_label) then
+                if #PathRecorder.points > 0 then
+                    -- Save to log file
+                    local filename = "LX_Nav_recorded_path.log"
+                    core.create_log_file(filename)
+
+                    local lines = {}
+                    lines[#lines + 1] = "=== RECORDED PATH ==="
+                    lines[#lines + 1] = string.format("Points: %d", #PathRecorder.points)
+                    lines[#lines + 1] = string.format("Map ID: %d", core.get_instance_id())
+                    lines[#lines + 1] = ""
+                    lines[#lines + 1] = "-- Format: x, y, z, time"
+                    for i, pt in ipairs(PathRecorder.points) do
+                        lines[#lines + 1] = string.format("[%d] %.2f, %.2f, %.2f, %.2f",
+                            i, pt.x, pt.y, pt.z, pt.time)
+                    end
+                    lines[#lines + 1] = ""
+                    lines[#lines + 1] = "-- Lua table format:"
+                    lines[#lines + 1] = "local recorded_path = {"
+                    for i, pt in ipairs(PathRecorder.points) do
+                        local comma = i < #PathRecorder.points and "," or ""
+                        lines[#lines + 1] = string.format("    {x=%.2f, y=%.2f, z=%.2f}%s",
+                            pt.x, pt.y, pt.z, comma)
+                    end
+                    lines[#lines + 1] = "}"
+
+                    core.write_log_file(filename, table.concat(lines, "\n"))
+                    Debug.log(string.format("[Recorder] Saved %d points to %s", #PathRecorder.points, filename))
+                else
+                    Debug.log_warning("[Recorder] No points to save")
+                end
             end
         end)
 
