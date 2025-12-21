@@ -1263,11 +1263,6 @@ local function init()
     menu:add_component(ui.status)
     y = y + 22
 
-    -- Load first path if available
-    if #saved_paths > 0 then
-        current_path = load_path(saved_paths[1])
-    end
-
     -- Create saved position buttons
     refresh_saved_position_buttons()
 end
