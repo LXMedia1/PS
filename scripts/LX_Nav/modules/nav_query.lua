@@ -694,8 +694,9 @@ local function step_cost(tileA, polyA, tileB, polyB)
 
     -- WALL PROXIMITY PENALTY: Penalize areas within 1 yard of walls (danger zone)
     -- This makes paths prefer staying inside the yellow simulated inner wall
+    -- AND strongly discourages using narrow passages when wider routes exist
     local dangerZone = 1.0  -- 1 yard from wall
-    local dangerPenalty = 1.5  -- 1.5x slower in danger zone
+    local dangerPenalty = 5.0  -- 5x slower in danger zone (strongly avoid narrow passages)
 
     -- Find nearest wall distance from polygon B center
     local nearestWallDist = math.huge
