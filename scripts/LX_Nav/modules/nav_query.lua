@@ -2165,6 +2165,11 @@ end
 -- Fix waypoint Z heights by searching raw tile for containing polygon
 -- Searches ALL polygons (not just corridor) since wall avoidance may push waypoints outside corridor
 local function fixWaypointHeights(waypoints, owners, polyPath, world, startPos, nq)
+    -- Guard against nil waypoints
+    if not waypoints or #waypoints == 0 then
+        return waypoints
+    end
+
     local prevZ = startPos.z
     local MAX_Z_JUMP = 8.0  -- Maximum allowed Z change per waypoint
 
