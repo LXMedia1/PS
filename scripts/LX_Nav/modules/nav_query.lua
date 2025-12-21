@@ -786,6 +786,89 @@ function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, max
             end
         end
 
+        -- =========================
+        -- Off-Mesh Connection Expansion
+        -- =========================
+        -- Off-mesh polygons (jumps, teleports, etc.) connect via internal links (side=0xFF)
+        -- rather than via edge neighbors. We check internal links to enable pathfinding
+        -- across non-walkable transitions.
+
+        local internalLinks = get_internal_links(curTile, curPoly)
+        for _, linkData in ipairs(internalLinks) do
+            local nTileId = linkData.targetTileId
+            local nPoly = linkData.targetPoly
+
+            -- Internal links typically target the same tile
+            -- If tileId is 0, use current tile
+            if nTileId == 0 then
+                nTileId = curTileId
+            end
+
+            local nTile = world.tilesById[nTileId]
+            if nTile and nPoly > 0 and nPoly <= nTile.polyCount then
+                local nb = node_id(nTileId, nPoly)
+
+                -- Skip if already closed
+                if closed[nb] ~= sid then
+                    -- Get off-mesh connection data for cost calculation
+                    local conn = get_offmesh_connection(curTile, curPoly)
+                    local offmeshCost = nil
+                    local skipLink = false
+
+                    if conn and conn.startPos and conn.endPos then
+                        -- Handle unidirectional connections
+                        -- For unidirectional links, only allow traversal in the forward direction
+                        -- (from start polygon to landing polygon)
+                        if not conn.bidirectional then
+                            -- Check if current polygon is the off-mesh polygon (the "source")
+                            -- Only allow if we're at the off-mesh polygon going to the target
+                            local curIsOffmesh = is_offmesh_link(curTile, curPoly)
+                            if not curIsOffmesh then
+                                -- Current is a regular polygon trying to enter the off-mesh
+                                -- connection backwards - skip this link
+                                skipLink = true
+                            end
+                        end
+
+                        if not skipLink then
+                            -- Calculate off-mesh cost: 3D distance with base penalty
+                            offmeshCost = dist3D(
+                                conn.startPos.x, conn.startPos.y, conn.startPos.z,
+                                conn.endPos.x, conn.endPos.y, conn.endPos.z
+                            ) * 2.0  -- 2.0x base penalty for off-mesh transitions
+                        end
+                    elseif not skipLink then
+                        -- Fallback: use polygon center distance with penalty
+                        offmeshCost = step_cost(curTile, curPoly, nTile, nPoly)
+                        if offmeshCost < 1e30 then
+                            offmeshCost = offmeshCost * 2.0
+                        end
+                    end
+
+                    if offmeshCost and offmeshCost < 1e30 then
+                        local tentative = (g[cur] or 1e30) + offmeshCost
+
+                        if seen[nb] ~= sid or tentative < (g[nb] or 1e30) then
+                            parent[nb] = cur
+                            g[nb] = tentative
+
+                            local hx = dist2D(nTile.pCx[nPoly], nTile.pCy[nPoly],
+                                             goalTile.pCx[endPoly], goalTile.pCy[endPoly])
+                            local nf = tentative + hx
+                            f[nb] = nf
+
+                            if seen[nb] ~= sid then
+                                seen[nb] = sid
+                                heap:push(nb, nf)
+                            else
+                                heap:decrease(nb, nf)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
         ::continue::
     end
 
