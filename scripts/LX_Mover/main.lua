@@ -42,6 +42,22 @@ local is_tabbed_out = false       -- True when game window loses focus
 local PATH_FOLDER = "pathrecorder/"
 local MANIFEST_FILE = "pathrecorder/_manifest"
 
+-- Saved positions constants
+local POSITIONS_FILE = "lx_mover_positions"
+
+-- Nav path mode
+local nav_mode = false  -- true = using LX_Nav pathfinding, false = using recorded paths
+local nav_target_pos = nil  -- Target position for nav mode
+local nav_target_object = nil  -- Target object if following a moving target
+local nav_last_update = 0  -- Last time path was updated
+local saved_positions = {}  -- {name: {x, y, z, map_id}}
+
+-- Path transition state
+local old_path = nil  -- Previous path for smooth transitions
+local transition_progress = 1.0  -- 0.0 = full old path, 1.0 = full new path
+local transition_speed = 3.0  -- How fast to transition (per second)
+local path_updating = false  -- True when path is being recalculated
+
 -- Path smoothing settings
 local smooth_enabled = true
 local smooth_subdivisions = 3  -- Points to add between each original waypoint
@@ -111,6 +127,199 @@ local function smooth_path(points, subdivisions, is_loop)
     end
 
     return smoothed
+end
+
+-----------------------------------------------------------
+-- Saved Positions Management
+-----------------------------------------------------------
+
+local function load_saved_positions()
+    local content = core.read_data_file(POSITIONS_FILE)
+    saved_positions = {}
+
+    if not content or content == "" then
+        return
+    end
+
+    -- Parse JSON-like format: {"name":{"x":1,"y":2,"z":3,"map_id":1}}
+    for name, x, y, z, map_id in content:gmatch('"([^"]+)":%s*{[^}]*"x":([%d%.%-]+),"y":([%d%.%-]+),"z":([%d%.%-]+),"map_id":(%d+)') do
+        saved_positions[name] = {
+            x = tonumber(x),
+            y = tonumber(y),
+            z = tonumber(z),
+            map_id = tonumber(map_id)
+        }
+    end
+end
+
+local function save_saved_positions()
+    local lines = {}
+    table.insert(lines, "{")
+
+    local first = true
+    for name, pos in pairs(saved_positions) do
+        if not first then
+            table.insert(lines, ",")
+        end
+        first = false
+
+        local entry = string.format('"%s":{"x":%.2f,"y":%.2f,"z":%.2f,"map_id":%d}',
+            name, pos.x, pos.y, pos.z, pos.map_id)
+        table.insert(lines, entry)
+    end
+
+    table.insert(lines, "}")
+    local content = table.concat(lines, "\n")
+
+    core.create_data_file(POSITIONS_FILE)
+    core.write_data_file(POSITIONS_FILE, content)
+end
+
+local function save_current_position(name)
+    local player = core.object_manager.get_local_player()
+    if not player then
+        core.log_error("[LX_Mover] No local player")
+        return false
+    end
+
+    local pos = player:get_position()
+    local map_id = core.get_instance_id()
+
+    if not pos or not map_id then
+        core.log_error("[LX_Mover] Could not get player position")
+        return false
+    end
+
+    saved_positions[name] = {
+        x = pos.x,
+        y = pos.y,
+        z = pos.z,
+        map_id = map_id
+    }
+
+    save_saved_positions()
+    core.log("[LX_Mover] Saved position: " .. name)
+    return true
+end
+
+local function delete_saved_position(name)
+    if saved_positions[name] then
+        saved_positions[name] = nil
+        save_saved_positions()
+        core.log("[LX_Mover] Deleted position: " .. name)
+        return true
+    end
+    return false
+end
+
+-----------------------------------------------------------
+-- Nav Path Requests (using LX_Nav)
+-----------------------------------------------------------
+
+local function request_nav_path(target_pos)
+    local LX_Nav = _G.LX_Nav
+    if not LX_Nav then
+        core.log_error("[LX_Mover] LX_Nav not available")
+        return nil
+    end
+
+    -- Request path from LX_Nav
+    local result = LX_Nav.request_path(target_pos)
+    if not result or not result.path then
+        core.log_error("[LX_Mover] Failed to get path from LX_Nav")
+        return nil
+    end
+
+    -- Convert to our format with original points
+    local original_points = {}
+    for _, p in ipairs(result.path) do
+        table.insert(original_points, {x = p.x, y = p.y, z = p.z})
+    end
+
+    local path_data = {
+        name = "Nav Path",
+        path_type = "once",  -- Nav paths are one-time, not loops
+        points = {},
+        original_points = original_points
+    }
+
+    -- Apply smoothing if enabled (same as recorded paths)
+    if smooth_enabled and #original_points >= 3 then
+        path_data.points = smooth_path(original_points, smooth_subdivisions, false)  -- false = not a loop
+    else
+        path_data.points = original_points
+    end
+
+    core.log(string.format("[LX_Mover] Nav path created with %d waypoints (%d after smoothing)",
+        #original_points, #path_data.points))
+    return path_data
+end
+
+local function request_path_to_position(target_pos, target_object)
+    local path_data = request_nav_path(target_pos)
+    if path_data then
+        -- Save old path for smooth transition
+        if current_path and nav_mode then
+            old_path = current_path
+            transition_progress = 0.0
+        end
+
+        current_path = path_data
+        current_index = 1
+        path_direction = 1
+        nav_mode = true
+        nav_target_pos = target_pos
+        nav_target_object = target_object  -- Store object reference if following a moving target
+        nav_last_update = core.time and core.time() or 0  -- Initialize update timer
+        path_updating = false
+    end
+    return path_data ~= nil
+end
+
+local function request_path_to_saved_position(name)
+    local pos = saved_positions[name]
+    if not pos then
+        core.log_error("[LX_Mover] No saved position with name: " .. name)
+        return false
+    end
+
+    -- Check if we're on the same map
+    local map_id = core.get_instance_id()
+    if map_id and map_id ~= pos.map_id then
+        core.log_warning(string.format("[LX_Mover] Position %s is on a different map (current: %d, saved: %d)",
+            name, map_id, pos.map_id))
+        return false
+    end
+
+    return request_path_to_position(pos)
+end
+
+local function request_path_to_click()
+    -- Enable click mode - next mouse click will set target
+    core.log("[LX_Mover] Click on the map to set destination...")
+    return true
+end
+
+local function request_path_to_target()
+    local player = core.object_manager.get_local_player()
+    if not player then
+        core.log_error("[LX_Mover] No local player")
+        return false
+    end
+
+    local target = player:get_target()
+    if not target then
+        core.log_error("[LX_Mover] No target selected")
+        return false
+    end
+
+    local target_pos = target:get_position()
+    if not target_pos then
+        core.log_error("[LX_Mover] Could not get target position")
+        return false
+    end
+
+    return request_path_to_position(target_pos, target)
 end
 
 -----------------------------------------------------------
@@ -287,7 +496,18 @@ local function advance_to_next_waypoint()
 
     -- Handle path boundaries
     if path_direction == 1 and current_index > num_points then
-        if current_path.path_type == "loop" or loop_enabled then
+        -- For nav mode paths, always stop at destination (ignore loop_enabled checkbox)
+        if nav_mode then
+            state = STATE.IDLE
+            stop_all_movement()
+            nav_mode = false
+            nav_target_pos = nil
+            nav_target_object = nil
+            current_path = nil  -- Clear path visualization
+            old_path = nil
+            core.log("[LX_Mover] Destination reached")
+            return false
+        elseif current_path.path_type == "loop" or loop_enabled then
             current_index = 1
         elseif current_path.path_type == "pingpong" then
             path_direction = -1
@@ -368,6 +588,9 @@ local function stop_path()
     state = STATE.IDLE
     current_index = 1
     path_direction = 1
+    nav_mode = false
+    nav_target_pos = nil
+    nav_target_object = nil
 end
 
 -----------------------------------------------------------
@@ -390,6 +613,83 @@ local function update_movement()
     local pos = player:get_position()
     if not pos then return end
 
+    -- Update path transition
+    if transition_progress < 1.0 then
+        local dt = core.delta_time and core.delta_time() or 0.016
+        transition_progress = math.min(1.0, transition_progress + transition_speed * dt)
+
+        -- Clear old path when transition complete
+        if transition_progress >= 1.0 then
+            old_path = nil
+        end
+    end
+
+    -- Update path if following a moving target
+    if nav_mode and nav_target_object and not path_updating then
+        local now = core.time and core.time() or 0
+        -- Check target position every 0.5 seconds
+        if now - nav_last_update > 0.5 then
+            -- Use pcall to safely get position (target may be out of sight or temporarily invalid)
+            local success, new_target_pos = pcall(function()
+                return nav_target_object:get_position()
+            end)
+
+            if success and new_target_pos then
+                -- Check if target has moved (> 1 yard)
+                local dx = new_target_pos.x - nav_target_pos.x
+                local dy = new_target_pos.y - nav_target_pos.y
+                local dz = new_target_pos.z - nav_target_pos.z
+                local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+
+                if dist > 1.0 then
+                    -- Target moved, recalculate path with smoothing
+                    core.log("[LX_Mover] Target moved, updating path...")
+                    path_updating = true
+
+                    -- Request new path from current position
+                    local LX_Nav = _G.LX_Nav
+                    if LX_Nav then
+                        local result = LX_Nav.request_path(new_target_pos)
+                        if result and result.path then
+                            -- Convert and apply smoothing
+                            local original_points = {}
+                            for _, p in ipairs(result.path) do
+                                table.insert(original_points, {x = p.x, y = p.y, z = p.z})
+                            end
+
+                            local new_path_data = {
+                                name = "Nav Path",
+                                path_type = "once",
+                                points = {},
+                                original_points = original_points
+                            }
+
+                            if smooth_enabled and #original_points >= 3 then
+                                new_path_data.points = smooth_path(original_points, smooth_subdivisions, false)
+                            else
+                                new_path_data.points = original_points
+                            end
+
+                            -- Save old path for smooth transition
+                            old_path = current_path
+                            transition_progress = 0.0
+                            current_path = new_path_data
+                            nav_target_pos = new_target_pos
+
+                            -- Find closest waypoint on new path to maintain smooth movement
+                            -- This prevents jarring stops/restarts
+                            current_index = find_closest_waypoint()
+                        end
+                    end
+
+                    path_updating = false
+                    nav_last_update = now
+                end
+            end
+            nav_last_update = now
+        end
+    end
+
     local target = get_current_waypoint()
     if not target then
         stop_path()
@@ -405,8 +705,10 @@ local function update_movement()
     local look_distance = math.max(base_look_distance * speed_ratio, 10)  -- Min 10
     local threshold = math.max(math.min(base_threshold * speed_ratio, 8), 2)  -- Clamp 2-8
 
-    -- Calculate distance to current waypoint
-    local distance = pos:dist_to(target)
+    -- Calculate 2D distance to current waypoint (ignore Z/height)
+    local dx = target.x - pos.x
+    local dy = target.y - pos.y
+    local distance = math.sqrt(dx*dx + dy*dy)
 
     -- Check if we've arrived at waypoint (NO STOPPING - just advance)
     if distance < threshold then
@@ -414,7 +716,9 @@ local function update_movement()
         -- Get next target immediately for smooth transition
         target = get_current_waypoint()
         if not target then return end
-        distance = pos:dist_to(target)
+        dx = target.x - pos.x
+        dy = target.y - pos.y
+        distance = math.sqrt(dx*dx + dy*dy)
     end
 
     -- Make sure we're moving forward
@@ -424,22 +728,21 @@ local function update_movement()
     local dir = player:get_direction()
     if not dir then return end
 
-    -- Calculate direction to target
+    -- Calculate 2D direction to target (ignore Z/height)
     local to_target_x = target.x - pos.x
     local to_target_y = target.y - pos.y
-    local to_target_z = target.z - pos.z
 
-    -- Normalize target direction
-    local len = math.sqrt(to_target_x * to_target_x + to_target_y * to_target_y + to_target_z * to_target_z)
+    -- Normalize target direction (2D only)
+    local len = math.sqrt(to_target_x * to_target_x + to_target_y * to_target_y)
     if len < 0.001 then return end
     to_target_x = to_target_x / len
     to_target_y = to_target_y / len
-    to_target_z = to_target_z / len
 
-    -- Interpolate (lerp) between current direction and target direction
+    -- Interpolate (lerp) between current direction and target direction (X and Y only)
     local new_dir_x = dir.x + (to_target_x - dir.x) * turn_speed
     local new_dir_y = dir.y + (to_target_y - dir.y) * turn_speed
-    local new_dir_z = dir.z + (to_target_z - dir.z) * turn_speed
+    -- Keep original Z direction (don't try to move up/down artificially)
+    local new_dir_z = dir.z
 
     -- Create a point to look at (current position + interpolated direction * some distance)
     local look_point = vec3.new(
@@ -495,71 +798,43 @@ local function render_path()
     local player = core.object_manager.get_local_player()
     local player_pos = player and player:get_position() or nil
 
-    -- Colors
-    local col_original = color.new(255, 80, 80, 150)       -- Red - original path
-    local col_original_point = color.new(255, 100, 100, 200)
-    local col_smooth = color.new(0, 200, 100, 200)         -- Green - smoothed path
-    local col_current = color.new(255, 220, 0, 255)        -- Yellow - current target
-    local col_player_line = color.new(255, 255, 0, 200)
+    -- Color
+    local col_smooth = color.new(0, 200, 100, 200)  -- Green - smoothed path
 
-    -- ========== DRAW ORIGINAL PATH (RED) ==========
-    if current_path.original_points and #current_path.original_points > 0 then
-        local orig_2d = {}
+    local points_2d = {}
+    local display_points = {}
 
-        -- Convert original points to screen
-        for i, p in ipairs(current_path.original_points) do
-            local world_pos = vec3.new(p.x, p.y, p.z)
-            local screen = core.graphics.w2s(world_pos)
-            if screen and screen.x > 0 and screen.y > 0 then
-                orig_2d[i] = {x = screen.x, y = screen.y, valid = true}
-            else
-                orig_2d[i] = {valid = false}
-            end
+    -- ========== MORPH OLD PATH TO NEW PATH ==========
+    if old_path and old_path.points and #old_path.points > 0 and transition_progress < 1.0 then
+        -- Interpolate between old and new path waypoints
+        local old_count = #old_path.points
+        local new_count = #current_path.points
+
+        -- Use the new path size as target, interpolate positions
+        for i = 1, new_count do
+            local new_p = current_path.points[i]
+
+            -- Map index from new path to old path (proportional mapping)
+            local old_i = math.floor((i - 1) * (old_count - 1) / math.max(1, new_count - 1)) + 1
+            old_i = math.min(old_i, old_count)
+
+            local old_p = old_path.points[old_i]
+
+            -- Lerp between old and new position
+            local t = transition_progress
+            local lerp_x = old_p.x + (new_p.x - old_p.x) * t
+            local lerp_y = old_p.y + (new_p.y - old_p.y) * t
+            local lerp_z = old_p.z + (new_p.z - old_p.z) * t
+
+            display_points[i] = {x = lerp_x, y = lerp_y, z = lerp_z}
         end
-
-        -- Draw original path lines
-        for i = 1, #current_path.original_points - 1 do
-            if orig_2d[i].valid and orig_2d[i + 1].valid then
-                core.graphics.line_2d(
-                    vec2.new(orig_2d[i].x, orig_2d[i].y),
-                    vec2.new(orig_2d[i + 1].x, orig_2d[i + 1].y),
-                    col_original,
-                    2
-                )
-            end
-        end
-
-        -- Draw closing line for loop
-        if (current_path.path_type == "loop" or loop_enabled) and #current_path.original_points > 2 then
-            local first = orig_2d[1]
-            local last = orig_2d[#current_path.original_points]
-            if first.valid and last.valid then
-                core.graphics.line_2d(
-                    vec2.new(last.x, last.y),
-                    vec2.new(first.x, first.y),
-                    col_original,
-                    2
-                )
-            end
-        end
-
-        -- Draw original waypoint markers
-        for i, p2d in ipairs(orig_2d) do
-            if p2d.valid then
-                core.graphics.circle_2d_filled(
-                    vec2.new(p2d.x, p2d.y),
-                    5,
-                    col_original_point
-                )
-            end
-        end
+    else
+        -- No transition, use current path directly
+        display_points = current_path.points
     end
 
-    -- ========== DRAW SMOOTHED PATH (GREEN) ==========
-    local points_2d = {}
-
-    -- Convert smoothed points to screen coordinates
-    for i, p in ipairs(current_path.points) do
+    -- Convert display points to screen coordinates
+    for i, p in ipairs(display_points) do
         local world_pos = vec3.new(p.x, p.y, p.z)
         local screen = core.graphics.w2s(world_pos)
         if screen and screen.x > 0 and screen.y > 0 then
@@ -569,8 +844,8 @@ local function render_path()
         end
     end
 
-    -- Draw smoothed path lines
-    for i = 1, #current_path.points - 1 do
+    -- Draw morphing path
+    for i = 1, #display_points - 1 do
         if points_2d[i].valid and points_2d[i + 1].valid then
             core.graphics.line_2d(
                 vec2.new(points_2d[i].x, points_2d[i].y),
@@ -581,10 +856,10 @@ local function render_path()
         end
     end
 
-    -- Draw closing line for loop paths
-    if (current_path.path_type == "loop" or loop_enabled) and #current_path.points > 2 then
+    -- Draw closing line for loop paths (but not for nav mode paths)
+    if not nav_mode and (current_path.path_type == "loop" or loop_enabled) and #display_points > 2 then
         local first = points_2d[1]
-        local last = points_2d[#current_path.points]
+        local last = points_2d[#display_points]
         if first.valid and last.valid then
             core.graphics.line_2d(
                 vec2.new(last.x, last.y),
@@ -594,34 +869,72 @@ local function render_path()
             )
         end
     end
+end
 
-    -- Draw line from player to current target
-    if state == STATE.MOVING and player_pos then
-        local target = get_current_waypoint()
-        if target then
-            local player_screen = core.graphics.w2s(player_pos)
-            local target_screen = core.graphics.w2s(target)
-            if player_screen and target_screen and player_screen.x > 0 and target_screen.x > 0 then
-                core.graphics.line_2d(
-                    vec2.new(player_screen.x, player_screen.y),
-                    vec2.new(target_screen.x, target_screen.y),
-                    col_player_line,
-                    3
-                )
-            end
+-----------------------------------------------------------
+-- Saved Position Buttons Management
+-----------------------------------------------------------
+
+local function refresh_saved_position_buttons()
+    if not menu or not ui.saved_pos_y_start then return end
+
+    -- Remove old buttons
+    for _, btn_data in ipairs(ui.saved_pos_buttons) do
+        if btn_data.btn then
+            menu:remove_component(btn_data.btn)
+        end
+        if btn_data.del_btn then
+            menu:remove_component(btn_data.del_btn)
         end
     end
+    ui.saved_pos_buttons = {}
 
-    -- Draw current target marker (yellow, larger)
-    if current_index >= 1 and current_index <= #current_path.points then
-        local p2d = points_2d[current_index]
-        if p2d and p2d.valid then
-            core.graphics.circle_2d_filled(
-                vec2.new(p2d.x, p2d.y),
-                8,
-                col_current
-            )
-        end
+    -- Create new buttons for each saved position
+    local y = ui.saved_pos_y_start
+    local p = 12
+    local menu_w = 340
+    local btn_h = 24
+    local max_buttons = 4  -- Maximum buttons to show
+
+    local count = 0
+    for name, pos in pairs(saved_positions) do
+        if count >= max_buttons then break end
+
+        local btn_data = {}
+
+        -- Go button (main button)
+        btn_data.btn = _G.LX_UI.Button:new({
+            text = name,
+            x = p,
+            y = y,
+            width = menu_w - p*2 - 40,
+            height = btn_h,
+            style = "secondary",
+            on_click = function()
+                if request_path_to_saved_position(name) then
+                    start_path()
+                end
+            end
+        })
+        menu:add_component(btn_data.btn)
+
+        -- Delete button (X button on the right)
+        btn_data.del_btn = _G.LX_UI.Button:new({
+            text = "X",
+            x = menu_w - p - 35,
+            y = y,
+            width = 35,
+            height = btn_h,
+            on_click = function()
+                delete_saved_position(name)
+                refresh_saved_position_buttons()
+            end
+        })
+        menu:add_component(btn_data.del_btn)
+
+        table.insert(ui.saved_pos_buttons, btn_data)
+        y = y + btn_h + 4
+        count = count + 1
     end
 end
 
@@ -637,10 +950,11 @@ local function init()
 
     initialized = true
     refresh_path_list()
+    load_saved_positions()
 
     -- Layout
     local menu_w = 340
-    local menu_h = 280
+    local menu_h = 620  -- Increased to fit all UI elements including saved positions
     local p = 12
     local btn_h = 28
 
@@ -783,6 +1097,87 @@ local function init()
     menu:add_component(ui.progress)
     y = y + 28
 
+    -- Nav Path Section
+    local header_nav = Label:new({
+        text = "NAV PATH (LX_Nav)",
+        x = p,
+        y = y,
+        width = menu_w - p*2,
+        height = 18,
+        font_size = 11
+    })
+    menu:add_component(header_nav)
+    y = y + 24
+
+    -- Nav path buttons (3 buttons in a row)
+    local nav_btn_w = (menu_w - p*2 - 12) / 3
+
+    ui.path_to_target_btn = Button:new({
+        text = "To Target",
+        x = p,
+        y = y,
+        width = nav_btn_w,
+        height = btn_h - 4,
+        on_click = function()
+            if request_path_to_target() then
+                start_path()
+            end
+        end
+    })
+    menu:add_component(ui.path_to_target_btn)
+
+    ui.path_to_click_btn = Button:new({
+        text = "To Click",
+        x = p + nav_btn_w + 6,
+        y = y,
+        width = nav_btn_w,
+        height = btn_h - 4,
+        on_click = function()
+            click_to_path_mode = true
+            core.log("[LX_Mover] Click on the map to set destination")
+        end
+    })
+    menu:add_component(ui.path_to_click_btn)
+
+    ui.save_pos_btn = Button:new({
+        text = "Save Pos",
+        x = p + (nav_btn_w + 6) * 2,
+        y = y,
+        width = nav_btn_w,
+        height = btn_h - 4,
+        on_click = function()
+            -- Save position with auto-generated name
+            local count = 0
+            for _ in pairs(saved_positions) do count = count + 1 end
+            local name = "Pos_" .. tostring(count + 1)
+
+            if save_current_position(name) then
+                core.log("[LX_Mover] Position saved as: " .. name)
+                refresh_saved_position_buttons()
+            end
+        end
+    })
+    menu:add_component(ui.save_pos_btn)
+    y = y + btn_h - 4 + 12
+
+    -- Saved Positions header
+    local header_saved = Label:new({
+        text = "Saved Positions:",
+        x = p,
+        y = y,
+        width = menu_w - p*2,
+        height = 16,
+        font_size = 10
+    })
+    menu:add_component(header_saved)
+    y = y + 18
+
+    -- Saved positions list (dynamic buttons created by refresh function)
+    ui.saved_pos_buttons = {}
+    ui.saved_pos_y_start = y
+    ui.saved_pos_scroll = 0
+    y = y + 105  -- Reserve space for saved position buttons (max 4 buttons at 24px + 4px spacing)
+
     -- Settings Section
     local header3 = Label:new({
         text = "SETTINGS",
@@ -808,22 +1203,26 @@ local function init()
         end
     })
     menu:add_component(ui.loop_check)
-    y = y + 28
+    y = y + 32
 
     -- Status label
     ui.status = Label:new({
         text = "Status: Idle",
         x = p,
-        y = menu_h - 30,
+        y = y,
         width = menu_w - p*2,
         height = 18
     })
     menu:add_component(ui.status)
+    y = y + 22
 
     -- Load first path if available
     if #saved_paths > 0 then
         current_path = load_path(saved_paths[1])
     end
+
+    -- Create saved position buttons
+    refresh_saved_position_buttons()
 end
 
 -----------------------------------------------------------
@@ -873,6 +1272,51 @@ local function update_ui()
 end
 
 -----------------------------------------------------------
+-- Click Detection for Path-to-Click Mode
+-----------------------------------------------------------
+
+local click_state = {
+    last_click_time = 0,
+    pos_name_input = "",
+    save_mode_active = false
+}
+
+local function handle_click_to_path()
+    if not click_to_path_mode then return end
+
+    -- Check for mouse click (left button)
+    local is_mouse_down = core.input.is_key_pressed(0x01)  -- VK_LBUTTON
+
+    -- Detect click edge (mouse was up, now down)
+    if is_mouse_down and not prev_mouse_down then
+        -- Try to get world position at cursor using collision query
+        if core.collision and core.collision.query_position then
+            local world_pos = core.collision.query_position()
+            if world_pos then
+                core.log(string.format("[LX_Mover] Pathfinding to clicked position (%.1f, %.1f, %.1f)",
+                    world_pos.x, world_pos.y, world_pos.z))
+
+                -- Request path to clicked position
+                if request_path_to_position(world_pos, nil) then
+                    -- Start moving
+                    start_path()
+                end
+
+                click_to_path_mode = false
+            else
+                core.log_warning("[LX_Mover] Could not get world position at cursor")
+            end
+        else
+            core.log_error("[LX_Mover] Collision API not available - click-to-path not supported")
+            click_to_path_mode = false
+        end
+    end
+
+    prev_mouse_down = is_mouse_down
+end
+
+
+-----------------------------------------------------------
 -- Callbacks
 -----------------------------------------------------------
 
@@ -886,6 +1330,7 @@ local function on_update()
         menu:update()
     end
 
+    handle_click_to_path()
     update_movement()
     update_tabbed_out()
     update_ui()

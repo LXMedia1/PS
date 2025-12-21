@@ -2803,3 +2803,57 @@ core.register_on_render_menu_callback(on_render_menu)
 
 -- Run initialization
 initialize()
+
+-- Export API for other plugins (LX_Mover, etc.)
+local LX_Nav = {}
+
+-- Request a path from current position to target
+-- Returns: {path, originalPath, stats} or nil on failure
+function LX_Nav.request_path(target_pos)
+    if not PathState.world or not PathState.query then
+        core.log_error("[LX_Nav] Navigation not initialized")
+        return nil
+    end
+
+    local player = core.object_manager.get_local_player()
+    if not player then
+        core.log_error("[LX_Nav] No local player")
+        return nil
+    end
+
+    local start_pos = player:get_position()
+    if not start_pos then
+        core.log_error("[LX_Nav] Could not get player position")
+        return nil
+    end
+
+    local map_id = core.get_instance_id()
+    if not map_id then
+        core.log_error("[LX_Nav] Could not get instance ID")
+        return nil
+    end
+
+    -- Build path
+    local result = PathState.query:find_path(
+        start_pos.x, start_pos.y, start_pos.z,
+        target_pos.x, target_pos.y, target_pos.z
+    )
+
+    if not result or not result.success then
+        core.log_error("[LX_Nav] Pathfinding failed")
+        return nil
+    end
+
+    -- Don't store path in PathState when called from other plugins
+    -- (prevents dual path visualization)
+
+    return {
+        path = result.path,
+        originalPath = result.originalPath,
+        polyPath = result.polyPath,
+        stats = result.stats
+    }
+end
+
+-- Export globally
+_G.LX_Nav = LX_Nav
