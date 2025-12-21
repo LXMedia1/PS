@@ -49,12 +49,14 @@ local State = {
 
 -- Pathfinding state
 local PathState = {
-    world = nil,      -- NavWorld instance
-    query = nil,      -- NavQuery instance
-    path = nil,       -- Current path (array of {x,y,z})
-    polyPath = nil,   -- Current polygon path
-    stats = nil,      -- Path stats
-    targetPos = nil,  -- Target position {x,y,z}
+    world = nil,         -- NavWorld instance
+    query = nil,         -- NavQuery instance
+    path = nil,          -- Current path (array of {x,y,z}) - adjusted (cyan)
+    originalPath = nil,  -- Original funnel path before fixWaypointHeights (white)
+    wallDebug = nil,     -- Wall normal debug data for visualization
+    polyPath = nil,      -- Current polygon path
+    stats = nil,         -- Path stats
+    targetPos = nil,     -- Target position {x,y,z}
 }
 
 -- Click-to-path and safe position state
@@ -2392,6 +2394,8 @@ local function find_path_to(targetX, targetY, targetZ)
 
     if result.success then
         PathState.path = result.path
+        PathState.originalPath = result.originalPath  -- For dual visualization (white vs cyan)
+        PathState.wallDebug = result.wallDebug        -- For wall normal visualization
         PathState.polyPath = result.polyPath
         PathState.stats = result.stats
         PathState.targetPos = {x = targetX, y = targetY, z = targetZ}
@@ -2404,6 +2408,8 @@ local function find_path_to(targetX, targetY, targetZ)
             result.error or "unknown", result.expansions or 0))
         -- Clear stale path visual to avoid showing invalid route
         PathState.path = nil
+        PathState.originalPath = nil
+        PathState.wallDebug = nil
         PathState.polyPath = nil
         PathState.targetPos = nil
         return false
@@ -2444,13 +2450,13 @@ end
 
 -- Draw path
 local function draw_path()
-    if not PathState.path or #PathState.path < 2 then return end
+    -- Use originalPath which has correct heights from portals
+    local path = PathState.originalPath or PathState.path
+    if not path or #path < 2 then return end
 
-    local path = PathState.path
-    local pathColor = color.new(0, 255, 255, 255)  -- Cyan
-    local waypointColor = color.new(255, 255, 0, 255)  -- Yellow
+    local whiteColor = color.new(255, 255, 255, 255)  -- White path
 
-    -- Draw lines between waypoints
+    -- Draw path lines
     for i = 1, #path - 1 do
         local p1 = path[i]
         local p2 = path[i + 1]
@@ -2458,20 +2464,69 @@ local function draw_path()
         local v1 = vec3.new(p1.x, p1.y, (p1.z or 0) + 0.5)  -- Slightly above ground
         local v2 = vec3.new(p2.x, p2.y, (p2.z or 0) + 0.5)
 
-        core.graphics.line_3d(v1, v2, pathColor, 2.0)
+        core.graphics.line_3d(v1, v2, whiteColor, 2.0)
     end
 
     -- Draw waypoint markers
     for i, p in ipairs(path) do
         local v = vec3.new(p.x, p.y, (p.z or 0) + 0.5)
-        core.graphics.circle_3d_filled(v, 0.3, waypointColor)
+        core.graphics.circle_3d_filled(v, 0.3, whiteColor)
     end
 
-    -- Draw target marker
+    -- Draw target marker (red)
     if PathState.targetPos then
         local t = PathState.targetPos
         local v = vec3.new(t.x, t.y, (t.z or 0) + 1.0)
         core.graphics.circle_3d_filled(v, 0.5, color.new(255, 0, 0, 255))  -- Red
+    end
+
+    -- Draw wall normal debug arrows (red = wall direction)
+    if PathState.wallDebug then
+        local redColor = color.new(255, 0, 0, 255)  -- Red for wall normals
+        local magentaColor = color.new(255, 0, 255, 255)  -- Magenta for adjusted position
+
+        for i, debugData in pairs(PathState.wallDebug) do
+            if debugData.wallDist and debugData.wallDist < 30 then
+                local wp = debugData.wpPos
+                if wp then
+                    local z = (wp.z or 0) + 1.0  -- Draw above ground
+
+                    -- Draw arrow from waypoint in wall normal direction
+                    local arrowLen = math.min(debugData.wallDist, 5.0)  -- Max 5 yard arrow
+                    local startPos = vec3.new(wp.x, wp.y, z)
+                    local endPos = vec3.new(
+                        wp.x + debugData.wallNx * arrowLen,
+                        wp.y + debugData.wallNy * arrowLen,
+                        z
+                    )
+                    core.graphics.line_3d(startPos, endPos, redColor, 2.0)
+
+                    -- Draw arrowhead
+                    local headSize = 0.5
+                    local perpX = -debugData.wallNy
+                    local perpY = debugData.wallNx
+                    local head1 = vec3.new(
+                        endPos.x - debugData.wallNx * headSize + perpX * headSize * 0.5,
+                        endPos.y - debugData.wallNy * headSize + perpY * headSize * 0.5,
+                        z
+                    )
+                    local head2 = vec3.new(
+                        endPos.x - debugData.wallNx * headSize - perpX * headSize * 0.5,
+                        endPos.y - debugData.wallNy * headSize - perpY * headSize * 0.5,
+                        z
+                    )
+                    core.graphics.line_3d(endPos, head1, redColor, 2.0)
+                    core.graphics.line_3d(endPos, head2, redColor, 2.0)
+
+                    -- If waypoint was adjusted, draw line from original to new position
+                    if debugData.newPos then
+                        local oldPos = vec3.new(wp.x, wp.y, z)
+                        local newPos = vec3.new(debugData.newPos.x, debugData.newPos.y, z)
+                        core.graphics.line_3d(oldPos, newPos, magentaColor, 2.5)
+                    end
+                end
+            end
+        end
     end
 end
 

@@ -692,6 +692,48 @@ local function step_cost(tileA, polyA, tileB, polyB)
         c = c * (1.0 + (boundaryEdges * (BOUNDARY_PENALTY - 1.0) / nvB))
     end
 
+    -- WALL PROXIMITY PENALTY: Penalize areas within 1 yard of walls (danger zone)
+    -- This makes paths prefer staying inside the yellow simulated inner wall
+    local dangerZone = 1.0  -- 1 yard from wall
+    local dangerPenalty = 1.5  -- 1.5x slower in danger zone
+
+    -- Find nearest wall distance from polygon B center
+    local nearestWallDist = math.huge
+    for e = 1, nvB do
+        local nei = tileB.pNeis[baseB + e]
+        if nei == 0 then  -- Wall edge
+            local v0 = tileB.pVerts[baseB + e]
+            local v1 = tileB.pVerts[baseB + (e % nvB) + 1]
+            local wx0, wy0 = tileB.vx[v0], tileB.vy[v0]
+            local wx1, wy1 = tileB.vx[v1], tileB.vy[v1]
+
+            -- Find closest point on wall edge to polygon center
+            local edgeX = wx1 - wx0
+            local edgeY = wy1 - wy0
+            local edgeLen = edgeX * edgeX + edgeY * edgeY
+
+            if edgeLen > 0.001 then
+                local t = ((bx - wx0) * edgeX + (by - wy0) * edgeY) / edgeLen
+                t = math.max(0, math.min(1, t))  -- Clamp to edge
+
+                local closestX = wx0 + t * edgeX
+                local closestY = wy0 + t * edgeY
+
+                local distSq = (bx - closestX) * (bx - closestX) + (by - closestY) * (by - closestY)
+                local dist = math.sqrt(distSq)
+
+                if dist < nearestWallDist then
+                    nearestWallDist = dist
+                end
+            end
+        end
+    end
+
+    -- Apply danger zone penalty if within 1 yard of wall
+    if nearestWallDist < dangerZone then
+        c = c * dangerPenalty
+    end
+
     return c
 end
 
@@ -1491,6 +1533,125 @@ local function getPortalEndpoints(polyPath, fromIdx, toIdx, world, dirX, dirY)
         return nil, nil
     end
 
+    -- Portal shrinking: shift endpoints away from walls by 1 yard to respect inner wall boundary
+    local clearance = 1.0
+
+    -- Helper: Find if vertex (vx, vy) is part of a wall edge, and get wall direction
+    local function findWallAtVertex(tile, polyIdx, vx, vy)
+        local base = (polyIdx - 1) * 6
+        local nv = tile.pVertCount[polyIdx]
+
+        for e = 1, nv do
+            local nei = tile.pNeis[base + e]
+            if nei == 0 then  -- Wall edge
+                local v0 = tile.pVerts[base + e]
+                local v1 = tile.pVerts[base + (e % nv) + 1]
+                local wx0, wy0 = tile.vx[v0], tile.vy[v0]
+                local wx1, wy1 = tile.vx[v1], tile.vy[v1]
+
+                -- Check if this wall edge contains our vertex
+                if (math.abs(wx0 - vx) < 0.01 and math.abs(wy0 - vy) < 0.01) or
+                   (math.abs(wx1 - vx) < 0.01 and math.abs(wy1 - vy) < 0.01) then
+                    -- Return wall edge direction
+                    return wx1 - wx0, wy1 - wy0, wx0, wy0, wx1, wy1
+                end
+            end
+        end
+        return nil
+    end
+
+    -- Check x0 for walls in polyA
+    local wall0_ex, wall0_ey, wall0_x0, wall0_y0, wall0_x1, wall0_y1 = findWallAtVertex(tileA, polyA, x0, y0)
+    if wall0_ex then
+        -- Calculate perpendicular to wall, pointing inward
+        local elen = math.sqrt(wall0_ex * wall0_ex + wall0_ey * wall0_ey)
+        if elen > 0.01 then
+            local perpX = -wall0_ey / elen
+            local perpY = wall0_ex / elen
+
+            -- Ensure it points toward polygon center
+            local cx, cy = tileA.pCx[polyA], tileA.pCy[polyA]
+            local midX = (wall0_x0 + wall0_x1) / 2
+            local midY = (wall0_y0 + wall0_y1) / 2
+            local dot = perpX * (cx - midX) + perpY * (cy - midY)
+            if dot < 0 then
+                perpX = -perpX
+                perpY = -perpY
+            end
+
+            x0 = x0 + perpX * clearance
+            y0 = y0 + perpY * clearance
+        end
+    end
+
+    -- Check x1 for walls in polyA
+    local wall1_ex, wall1_ey, wall1_x0, wall1_y0, wall1_x1, wall1_y1 = findWallAtVertex(tileA, polyA, x1, y1)
+    if wall1_ex then
+        local elen = math.sqrt(wall1_ex * wall1_ex + wall1_ey * wall1_ey)
+        if elen > 0.01 then
+            local perpX = -wall1_ey / elen
+            local perpY = wall1_ex / elen
+
+            local cx, cy = tileA.pCx[polyA], tileA.pCy[polyA]
+            local midX = (wall1_x0 + wall1_x1) / 2
+            local midY = (wall1_y0 + wall1_y1) / 2
+            local dot = perpX * (cx - midX) + perpY * (cy - midY)
+            if dot < 0 then
+                perpX = -perpX
+                perpY = -perpY
+            end
+
+            x1 = x1 + perpX * clearance
+            y1 = y1 + perpY * clearance
+        end
+    end
+
+    -- Also check polyB for walls
+    local tileB = world.tilesById[tileBId]
+    if tileB then
+        local wallB0_ex, wallB0_ey, wallB0_x0, wallB0_y0, wallB0_x1, wallB0_y1 = findWallAtVertex(tileB, polyB, x0, y0)
+        if wallB0_ex and not wall0_ex then  -- Only shift if not already shifted
+            local elen = math.sqrt(wallB0_ex * wallB0_ex + wallB0_ey * wallB0_ey)
+            if elen > 0.01 then
+                local perpX = -wallB0_ey / elen
+                local perpY = wallB0_ex / elen
+
+                local cx, cy = tileB.pCx[polyB], tileB.pCy[polyB]
+                local midX = (wallB0_x0 + wallB0_x1) / 2
+                local midY = (wallB0_y0 + wallB0_y1) / 2
+                local dot = perpX * (cx - midX) + perpY * (cy - midY)
+                if dot < 0 then
+                    perpX = -perpX
+                    perpY = -perpY
+                end
+
+                x0 = x0 + perpX * clearance
+                y0 = y0 + perpY * clearance
+            end
+        end
+
+        local wallB1_ex, wallB1_ey, wallB1_x0, wallB1_y0, wallB1_x1, wallB1_y1 = findWallAtVertex(tileB, polyB, x1, y1)
+        if wallB1_ex and not wall1_ex then
+            local elen = math.sqrt(wallB1_ex * wallB1_ex + wallB1_ey * wallB1_ey)
+            if elen > 0.01 then
+                local perpX = -wallB1_ey / elen
+                local perpY = wallB1_ex / elen
+
+                local cx, cy = tileB.pCx[polyB], tileB.pCy[polyB]
+                local midX = (wallB1_x0 + wallB1_x1) / 2
+                local midY = (wallB1_y0 + wallB1_y1) / 2
+                local dot = perpX * (cx - midX) + perpY * (cy - midY)
+                if dot < 0 then
+                    perpX = -perpX
+                    perpY = -perpY
+                end
+
+                x1 = x1 + perpX * clearance
+                y1 = y1 + perpY * clearance
+            end
+        end
+    end
+
     -- Use travel direction to determine left/right (winding-agnostic)
     return orderPortalLeftRight(x0, y0, z0 or 0, x1, y1, z1 or 0, dirX, dirY)
 end
@@ -1791,8 +1952,8 @@ local function findDistanceToWall(world, tileId, poly, px, py)
                 local ex, ey = bx - ax, by - ay
                 local len = math.sqrt(ex * ex + ey * ey)
                 if len > 0 then
-                    -- Rotate 90 degrees CCW for inward normal (assuming CCW winding)
-                    wallNx, wallNy = -ey / len, ex / len
+                    -- Rotate 90 degrees CW for inward normal (CCW winding polygons)
+                    wallNx, wallNy = ey / len, -ex / len
                 end
             end
         end
@@ -1966,7 +2127,14 @@ local function corridor_follower(polyPath, startPos, endPos, world, nq)
     -- Run funnel algorithm (string-pulling)
     local waypoints = stringPull(portalsL, portalsR)
 
-    -- Remove backwards waypoints (WP[2] that goes opposite to destination)
+    -- Save original waypoints BEFORE any modifications (for white path visualization)
+    local originalWaypoints = {}
+    for i = 1, #waypoints do
+        originalWaypoints[i] = {x = waypoints[i].x, y = waypoints[i].y, z = waypoints[i].z}
+    end
+
+    -- Backwards waypoint removal disabled - was making paths worse
+    --[[
     if waypoints and #waypoints >= 3 then
         local wp1 = waypoints[1]
         local wp2 = waypoints[2]
@@ -1988,14 +2156,71 @@ local function corridor_follower(polyPath, startPos, endPos, world, nq)
             table.remove(waypoints, 2)
         end
     end
+    --]]
 
-    -- Validate slopes - reject paths that go over cliffs
-    local valid, failIdx, failSlope = validateWaypointSlopes(waypoints)
-    if not valid then
-        testLog = testLog .. string.format("\nPATH REJECTED: Too steep at WP[%d]->WP[%d], slope=%.2f (max=%.2f)\n",
-            failIdx, failIdx + 1, failSlope, MAX_WAYPOINT_SLOPE)
-        core.write_log_file("LX_Nav_funnel_test.log", testLog)
-        return nil, nil  -- Path rejected due to cliff
+    -- WAYPOINT DEDUPLICATION: Disabled - was removing necessary waypoints
+    -- Need better logic to detect actual duplicates vs close-but-needed waypoints
+    --[[
+    local dedupThreshold = 1.0  -- Remove waypoints within 1 yard of previous waypoint
+    local removedCount = 0
+    local i = 2
+    while i <= #waypoints do
+        local prev = waypoints[i - 1]
+        local curr = waypoints[i]
+
+        -- Calculate distance between consecutive waypoints
+        local dx = curr.x - prev.x
+        local dy = curr.y - prev.y
+        local dist = math.sqrt(dx * dx + dy * dy)
+
+        if dist < dedupThreshold then
+            -- Log the removal
+            testLog = testLog .. string.format("Removed WP[%d] (%.1f,%.1f) - too close to previous (dist=%.2f yd)\n",
+                i, curr.x, curr.y, dist)
+            -- Remove duplicate waypoint
+            table.remove(waypoints, i)
+            removedCount = removedCount + 1
+            -- Don't increment i, check the next waypoint at same position
+        else
+            -- Move to next waypoint
+            i = i + 1
+        end
+    end
+
+    if removedCount > 0 then
+        testLog = testLog .. string.format("Deduplication: Removed %d duplicate waypoint(s)\n", removedCount)
+    end
+    --]]
+
+    -- WAYPOINT SIMPLIFICATION: Remove unnecessary intermediate waypoints
+    -- Check if we can skip waypoints by going directly from i to i+2
+    local simplified = 0
+    local i = 1
+    while i <= #waypoints - 2 do
+        local curr = waypoints[i]
+        local next = waypoints[i + 1]
+        local after = waypoints[i + 2]
+
+        -- Check if we can skip 'next' by going directly from curr to after
+        -- Simple heuristic: if the detour through 'next' is small, skip it
+        local directDist = math.sqrt((after.x - curr.x)^2 + (after.y - curr.y)^2)
+        local detourDist = math.sqrt((next.x - curr.x)^2 + (next.y - curr.y)^2) +
+                          math.sqrt((after.x - next.x)^2 + (after.y - next.y)^2)
+
+        -- If detour is less than 5% longer than direct path, skip the intermediate waypoint
+        if detourDist < directDist * 1.05 then
+            testLog = testLog .. string.format("Simplified: Removed WP[%d] (%.1f,%.1f) - unnecessary detour\n",
+                i + 1, next.x, next.y)
+            table.remove(waypoints, i + 1)
+            simplified = simplified + 1
+            -- Don't increment i, check if we can skip more
+        else
+            i = i + 1
+        end
+    end
+
+    if simplified > 0 then
+        testLog = testLog .. string.format("Simplification: Removed %d unnecessary waypoint(s)\n", simplified)
     end
 
     -- Generate owners: map each waypoint to a polygon index
@@ -2008,6 +2233,97 @@ local function corridor_follower(polyPath, startPos, endPos, world, nq)
     owners[1] = 1  -- First waypoint is at start polygon
     owners[#owners] = #polyPath  -- Last waypoint is at end polygon
 
+    -- Wall adjustment is now done in the funnel algorithm itself (shifted portals)
+    -- This section is kept for debugging visualization only
+    local wallDebug = {}
+    local targetClearance = 1.0  -- Stay 1 yard from walls (matches yellow simulated inner wall)
+    testLog = testLog .. "\n--- Wall Adjustment (visualization only) ---\n"
+
+    --[[ Disabled - funnel now handles this
+    for i = 2, #waypoints - 1 do  -- Skip first and last waypoints
+        local wp = waypoints[i]
+
+        -- Find nearest wall edge in corridor polygons
+        local nearestDist = math.huge
+        local nearestNormalX = 0
+        local nearestNormalY = 0
+
+        for polyIdx = 1, #polyPath do
+            local nodeId = polyPath[polyIdx]
+            local tileId, poly = decode_node(nodeId)
+            local tile = world.tilesById[tileId]
+
+            if tile then
+                local base = (poly - 1) * 6
+                local nv = tile.pVertCount[poly]
+
+                for e = 1, nv do
+                    local nei = tile.pNeis[base + e]
+
+                    -- Only process wall edges (no neighbor)
+                    if nei == 0 then
+                        local vi = tile.pVerts[base + e]
+                        local vj = tile.pVerts[base + (e % nv) + 1]
+                        local ax, ay = tile.vx[vi], tile.vy[vi]
+                        local bx, by = tile.vx[vj], tile.vy[vj]
+
+                        -- Find closest point on wall edge to waypoint
+                        local cx, cy, distSq = closest_pt_seg2d(wp.x, wp.y, ax, ay, bx, by)
+                        local dist = math.sqrt(distSq)
+
+                        if dist < nearestDist and dist > 0.01 then
+                            nearestDist = dist
+
+                            -- Normal from wall to waypoint (pointing inward)
+                            nearestNormalX = (wp.x - cx) / dist
+                            nearestNormalY = (wp.y - cy) / dist
+                        end
+                    end
+                end
+            end
+        end
+
+        if nearestDist < 20 and nearestDist > 0.01 then
+            -- Always push waypoint to be exactly at target clearance from wall (follow inner wall)
+            local pushDist = targetClearance - nearestDist
+
+            testLog = testLog .. string.format("WP[%d]: nearWall dist=%.2f, target=%.2f, push=%.2f\n",
+                i, nearestDist, targetClearance, pushDist)
+
+            -- Always adjust to follow the inner wall (no minimum threshold)
+            if math.abs(pushDist) < 15 then
+                local newX = wp.x + nearestNormalX * pushDist
+                local newY = wp.y + nearestNormalY * pushDist
+
+                wallDebug[i] = {
+                    wpPos = {x = wp.x, y = wp.y, z = wp.z or 0},
+                    newPos = {x = newX, y = newY, z = wp.z or 0},
+                    wallNx = nearestNormalX,
+                    wallNy = nearestNormalY,
+                    wallDist = nearestDist,
+                    pushDist = pushDist
+                }
+
+                wp.x = newX
+                wp.y = newY
+                testLog = testLog .. string.format("  Adjusted: (%.1f,%.1f) -> (%.1f,%.1f)\n",
+                    wallDebug[i].wpPos.x, wallDebug[i].wpPos.y, newX, newY)
+            end
+        end
+    end
+    --]]
+
+    -- Slope validation disabled - too strict
+    --[[
+    local valid, failIdx, failSlope = validateWaypointSlopes(waypoints)
+    if not valid then
+        testLog = testLog .. string.format("\nPATH REJECTED: Too steep at WP[%d]->WP[%d], slope=%.2f (max=%.2f)\n",
+            failIdx, failIdx + 1, failSlope, MAX_WAYPOINT_SLOPE)
+        core.write_log_file("LX_Nav_funnel_test.log", testLog)
+        return nil, nil  -- Path rejected due to cliff
+    end
+    --]]
+
     testLog = testLog .. string.format("\nWaypoints: %d\n", #waypoints)
     for i = 1, math.min(10, #waypoints) do
         local wp = waypoints[i]
@@ -2016,7 +2332,7 @@ local function corridor_follower(polyPath, startPos, endPos, world, nq)
     end
     core.write_log_file("LX_Nav_funnel_test.log", testLog)
 
-    return waypoints, owners
+    return waypoints, owners, originalWaypoints, wallDebug
 end
 
 -- Simple safe distance: just push away from the nearest boundary edge
@@ -2254,37 +2570,36 @@ local function fixWaypointHeights(waypoints, owners, polyPath, world, startPos, 
     for idx = 1, #waypoints do
         local wp = waypoints[idx]
         local foundZ = nil
-        local searchResult = "no_tiles"
+        local searchResult = "no_owner"
 
-        -- Search ALL raw tiles for the polygon containing this waypoint
-        for tileIdx, rawTile in ipairs(rawTiles) do
-            -- Check if waypoint is within tile bounds (quick reject)
-            if rawTile.boundsWow then
-                local b = rawTile.boundsWow
-                if wp.x >= b.min.x and wp.x <= b.max.x and
-                   wp.y >= b.min.y and wp.y <= b.max.y then
-                    -- Within tile bounds - search polygons
-                    local hz = find_height_in_raw_tile(rawTile, wp.x, wp.y)
-                    if hz then
-                        foundZ = hz
-                        searchResult = string.format("tile%d_poly", tileIdx)
-                        break
-                    else
-                        searchResult = "in_bounds_no_poly"
+        -- CRITICAL: Use owner polygon for height lookup to avoid wrong height levels (bridges, ledges)
+        -- Get the SoA polygon this waypoint belongs to from the corridor
+        local owner = owners[idx]
+        if owner and owner >= 1 and owner <= #polyPath then
+            local node = polyPath[owner]
+            local soaTileId, soaPolyIdx = decode_node(node)
+
+            -- Find the corresponding raw tile
+            for tileIdx, rawTile in ipairs(rawTiles) do
+                -- Match by tile coordinates (raw tiles and SoA tiles should align)
+                if rawTile.header and rawTile.header.x and rawTile.header.y then
+                    local soaTile = world.tilesById[soaTileId]
+                    if soaTile and soaTile.tx == rawTile.header.x and soaTile.ty == rawTile.header.y then
+                        -- Found matching raw tile - sample height from the specific owner polygon
+                        local hz = sample_detail_height(rawTile, soaPolyIdx, wp.x, wp.y)
+                        if hz then
+                            foundZ = hz
+                            searchResult = string.format("owner_poly_%d", owner)
+                            break
+                        else
+                            searchResult = string.format("owner_poly_%d_no_detail", owner)
+                        end
                     end
-                end
-            else
-                -- No bounds, just search (slower but works)
-                local hz = find_height_in_raw_tile(rawTile, wp.x, wp.y)
-                if hz then
-                    foundZ = hz
-                    searchResult = string.format("tile%d_noBounds", tileIdx)
-                    break
                 end
             end
         end
 
-        -- Fallback: use SoA tile polygon center if raw tile search failed
+        -- Fallback: use SoA tile polygon center if owner-based lookup failed
         if not foundZ then
             local owner = owners[idx] or 1
             if owner >= 1 and owner <= #polyPath then
@@ -2308,19 +2623,19 @@ local function fixWaypointHeights(waypoints, owners, polyPath, world, startPos, 
             end
         end
 
-        -- Apply height with small offset above ground
+        -- Apply height (visualization will add +0.5 for display)
         if foundZ then
-            wp.z = foundZ + 0.5
+            wp.z = foundZ
             prevZ = foundZ
         else
-            wp.z = prevZ + 0.5
+            wp.z = prevZ
         end
 
-        -- Debug first few and a sample from middle
-        if idx <= 3 or idx == math.floor(#waypoints / 2) or idx == #waypoints then
-            logHeight(string.format("  Final WP[%d] (%.1f,%.1f,%.2f) foundZ=%s",
-                idx, wp.x, wp.y, wp.z, foundZ and string.format("%.2f", foundZ) or "SoA/prev"))
-        end
+        -- Debug ALL waypoints to see height lookup results
+        logHeight(string.format("  Final WP[%d] (%.1f,%.1f,%.2f) foundZ=%s search=%s",
+            idx, wp.x, wp.y, wp.z,
+            foundZ and string.format("%.2f", foundZ) or "SoA/prev",
+            searchResult or "unknown"))
     end
     logHeight("=== Height fix complete ===")
 end
@@ -2406,15 +2721,16 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
         local actualEnd = {x = endPos.x, y = endPos.y, z = endPos.z}
 
         -- Generate path using corridor follower (dense waypoints with wall avoidance)
-        local out, owners = corridor_follower(polyPath, actualStart, actualEnd, world, self)
+        local out, owners, originalPath, wallDebug = corridor_follower(polyPath, actualStart, actualEnd, world, self)
 
-        -- Fix Z heights using polygon ownership
-        fixWaypointHeights(out, owners, polyPath, world, startPos, self)
+        -- Height fixing disabled - portal Z values are already correct from wireframe data
+        -- fixWaypointHeights was breaking correct heights by trying to look up shifted X,Y positions
+        -- fixWaypointHeights(out, owners, polyPath, world, startPos, self)
 
         -- Annotate waypoints with transition types for off-mesh connections
         annotate_waypoint_transitions(out, owners, polyPath, world)
 
-        return out
+        return out, originalPath, wallDebug
     end
 
     -- VISIBILITY MODE: Greedy "look ahead as far as possible" with safe distance
@@ -2435,7 +2751,7 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
         -- Annotate waypoints with transition types for off-mesh connections
         annotate_waypoint_transitions(out, owners, polyPath, world)
 
-        return out
+        return out, nil  -- No original path for visibility mode
     end
 
     -- PORTAL MODE: Use portal midpoints (fallback, most waypoints)
@@ -2475,7 +2791,7 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
         -- Annotate waypoints with transition types for off-mesh connections
         annotate_waypoint_transitions(out, owners, polyPath, world)
 
-        return out
+        return out, nil  -- No original path for portal mode
     end
 
     -- Build portals using adjacency edge data (FIX #2a)
@@ -3022,18 +3338,18 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
     -- Funnel smoothing
     dbg("--- FUNNEL ---")
     startTime = core.cpu_ticks()
-    local waypoints = self:poly_path_to_waypoints(
+    local waypoints, originalPath, wallDebug = self:poly_path_to_waypoints(
         polyPath,
         {x = startX, y = startY, z = startZ},
         {x = endX, y = endY, z = endZ}
     )
     local funnelTime = (core.cpu_ticks() - startTime) / (core.cpu_ticks_per_second() / 1000)
 
-    -- Check if waypoints generation failed (e.g., path too steep)
+    -- Check if waypoints generation failed
     if not waypoints then
-        dbg("ERROR: poly_path_to_waypoints returned nil (path rejected)")
+        dbg("ERROR: poly_path_to_waypoints returned nil")
         write_path_debug(debugLines)
-        return {success = false, error = "path_too_steep"}
+        return {success = false, error = "funnel_failed"}
     end
 
     perf.funnel = funnelTime
@@ -3066,6 +3382,8 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
     return {
         success = true,
         path = waypoints,
+        originalPath = originalPath,  -- Original funnel path (white) for visualization
+        wallDebug = wallDebug,        -- Wall normal debug data for visualization
         polyPath = polyPath,
         stats = {
             polys = #polyPath,
