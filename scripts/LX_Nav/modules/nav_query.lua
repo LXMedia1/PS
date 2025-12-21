@@ -578,6 +578,35 @@ local MAX_WAYPOINT_SLOPE = 0.6       -- Max slope between waypoints (~31 degrees
 -- Penalty multiplier for polygons near boundaries (walls/cliffs/edges)
 local BOUNDARY_PENALTY = 8.0  -- Strong preference for interior polygons
 
+-- =========================
+-- Off-Mesh Connection Cost Constants
+-- =========================
+-- Off-mesh connection types (matched to userId encoding in navmesh generation)
+-- Common conventions: 0=walk, 1=jump, 2=teleport/portal, 3=ladder, 4=elevator
+local OFFMESH_TYPE = {
+    WALK = 0,       -- Standard walkable connection
+    JUMP = 1,       -- Jump/drop connection (moderate penalty)
+    TELEPORT = 2,   -- Teleport/portal (high penalty, prefer walkable)
+    LADDER = 3,     -- Ladder climb (moderate penalty)
+    ELEVATOR = 4,   -- Elevator/lift (moderate penalty)
+}
+
+-- Cost multipliers for off-mesh connection types
+local OFFMESH_TYPE_COST = {
+    [OFFMESH_TYPE.WALK] = 1.0,       -- No extra penalty for walkable
+    [OFFMESH_TYPE.JUMP] = 1.5,       -- Moderate penalty for jumps
+    [OFFMESH_TYPE.TELEPORT] = 5.0,   -- High penalty - prefer walkable routes
+    [OFFMESH_TYPE.LADDER] = 2.0,     -- Moderate penalty for ladder
+    [OFFMESH_TYPE.ELEVATOR] = 1.8,   -- Slight penalty for elevator wait time
+}
+
+-- Base multiplier for all off-mesh transitions
+local OFFMESH_BASE_PENALTY = 2.0
+
+-- Narrow connection penalty threshold and multiplier
+local OFFMESH_NARROW_RADIUS = 1.0    -- Connections with radius below this get penalty
+local OFFMESH_NARROW_PENALTY = 1.5   -- Additional multiplier for narrow connections
+
 local function step_cost(tileA, polyA, tileB, polyB)
     -- Get polygon centers
     local ax, ay, az = tileA.pCx[polyA], tileA.pCy[polyA], tileA.pCz[polyA]
@@ -655,6 +684,54 @@ local function step_cost(tileA, polyA, tileB, polyB)
     end
 
     return c
+end
+
+-- =========================
+-- Off-Mesh Step Cost Calculation
+-- =========================
+
+-- Calculate cost for traversing an off-mesh connection
+-- Parameters:
+--   conn: off-mesh connection with startPos, endPos, radius, userId, flags
+-- Returns: cost value (higher = less preferred)
+local function step_cost_offmesh(conn)
+    if not conn or not conn.startPos or not conn.endPos then
+        return 1e30  -- Invalid connection
+    end
+
+    -- Base cost: 3D distance between start and end positions
+    local baseDist = dist3D(
+        conn.startPos.x, conn.startPos.y, conn.startPos.z,
+        conn.endPos.x, conn.endPos.y, conn.endPos.z
+    )
+
+    -- Minimum distance to prevent zero-cost teleports
+    if baseDist < 1.0 then
+        baseDist = 1.0
+    end
+
+    -- Apply base off-mesh penalty (makes walkable paths preferred when available)
+    local cost = baseDist * OFFMESH_BASE_PENALTY
+
+    -- Apply connection type penalty based on userId
+    -- userId encodes the connection type in navmesh generation
+    local connType = conn.userId or OFFMESH_TYPE.WALK
+    local typeCost = OFFMESH_TYPE_COST[connType]
+    if typeCost then
+        cost = cost * typeCost
+    else
+        -- Unknown type - apply moderate penalty (treat as jump)
+        cost = cost * OFFMESH_TYPE_COST[OFFMESH_TYPE.JUMP]
+    end
+
+    -- Apply narrow connection penalty
+    -- Narrow connections are harder to navigate and more risky
+    local radius = conn.radius or 0.5
+    if radius < OFFMESH_NARROW_RADIUS then
+        cost = cost * OFFMESH_NARROW_PENALTY
+    end
+
+    return cost
 end
 
 -- =========================
@@ -831,17 +908,16 @@ function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, max
                         end
 
                         if not skipLink then
-                            -- Calculate off-mesh cost: 3D distance with base penalty
-                            offmeshCost = dist3D(
-                                conn.startPos.x, conn.startPos.y, conn.startPos.z,
-                                conn.endPos.x, conn.endPos.y, conn.endPos.z
-                            ) * 2.0  -- 2.0x base penalty for off-mesh transitions
+                            -- Calculate off-mesh cost using specialized function
+                            -- Considers: 3D distance, connection type, radius penalties
+                            offmeshCost = step_cost_offmesh(conn)
                         end
                     elseif not skipLink then
-                        -- Fallback: use polygon center distance with penalty
+                        -- Fallback: use polygon center distance with base off-mesh penalty
+                        -- This handles cases where connection data is missing
                         offmeshCost = step_cost(curTile, curPoly, nTile, nPoly)
                         if offmeshCost < 1e30 then
-                            offmeshCost = offmeshCost * 2.0
+                            offmeshCost = offmeshCost * OFFMESH_BASE_PENALTY
                         end
                     end
 
