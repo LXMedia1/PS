@@ -289,6 +289,141 @@ local function is_offmesh_poly(tile, poly)
 end
 
 -- =========================
+-- Internal Link Traversal Utilities
+-- =========================
+-- These functions decode and traverse Detour's internal links (side=0xFF)
+-- to find off-mesh connections (jumps, teleports, etc.) for A* expansion
+
+-- Detour link constants
+local DT_NULL_LINK = 0xFFFFFFFF  -- End of link chain marker
+local DT_INTERNAL_LINK_SIDE = 0xFF  -- Side value for internal (non-cross-tile) links
+
+-- Decode 64-bit polygon reference to extract tile ID and polygon index
+-- Detour encoding: salt(12 bits) + tile(21 bits) + poly(31 bits)
+-- refLo contains poly (bits 0-30) and MSB of tile (bit 31)
+-- refHi contains tile (bits 0-19) and salt (bits 20-31)
+local function decode_poly_ref(refLo, refHi)
+    if not refLo or refLo == 0 then
+        return 0, 0  -- Invalid reference
+    end
+
+    -- Extract polygon index: bits 0-30 of refLo (31 bits)
+    local poly = refLo % 0x80000000  -- bits 0-30
+
+    -- Extract tile ID: bit 31 of refLo + bits 0-19 of refHi (21 bits total)
+    local tileLo = math.floor(refLo / 0x80000000)  -- bit 31 of refLo (0 or 1)
+    local tileHi = (refHi or 0) % 0x100000  -- bits 0-19 of refHi
+    local tileId = tileLo + tileHi * 2  -- Combine: tileLo is LSB, tileHi shifted left by 1
+
+    return tileId, poly
+end
+
+-- Get link data from flat array format
+-- Links are stored as 5 consecutive values per link:
+--   [base+1] = refLo (low 32 bits of target polygon ref)
+--   [base+2] = refHi (high 32 bits of target polygon ref)
+--   [base+3] = next link index (or DT_NULL_LINK)
+--   [base+4] = edge + side*256 (packed)
+--   [base+5] = bmin + bmax*256 (packed)
+local function get_link(soa, linkIdx)
+    if not soa.links or linkIdx == DT_NULL_LINK then
+        return nil
+    end
+
+    local base = linkIdx * 5
+    if base + 5 > #soa.links then
+        return nil
+    end
+
+    local refLo = soa.links[base + 1]
+    local refHi = soa.links[base + 2]
+    local nextLink = soa.links[base + 3]
+    local edgeSide = soa.links[base + 4]
+    local bminBmax = soa.links[base + 5]
+
+    return {
+        refLo = refLo,
+        refHi = refHi,
+        next = nextLink,
+        edge = edgeSide % 256,
+        side = math.floor(edgeSide / 256),
+        bmin = bminBmax % 256,
+        bmax = math.floor(bminBmax / 256)
+    }
+end
+
+-- Get all internal links for a polygon (side=0xFF only)
+-- Returns array of {link, targetTileId, targetPoly} or empty array
+-- Internal links are used for off-mesh connections within the same tile
+local function get_internal_links(tile, poly)
+    local results = {}
+
+    if not tile.pFirstLink or not tile.links then
+        return results
+    end
+
+    -- Get first link index for this polygon
+    local linkIdx = tile.pFirstLink[poly]
+    if not linkIdx or linkIdx == DT_NULL_LINK then
+        return results
+    end
+
+    -- Traverse the link chain
+    local maxIterations = 100  -- Safety limit to prevent infinite loops
+    local iterations = 0
+
+    while linkIdx ~= DT_NULL_LINK and iterations < maxIterations do
+        iterations = iterations + 1
+
+        local link = get_link(tile, linkIdx)
+        if not link then
+            break
+        end
+
+        -- Only process internal links (side = 0xFF)
+        if link.side == DT_INTERNAL_LINK_SIDE then
+            local targetTileId, targetPoly = decode_poly_ref(link.refLo, link.refHi)
+
+            -- Valid internal links should target the same tile
+            if targetPoly > 0 and targetPoly <= tile.polyCount then
+                table.insert(results, {
+                    link = link,
+                    targetTileId = targetTileId,
+                    targetPoly = targetPoly
+                })
+            end
+        end
+
+        -- Move to next link in chain
+        linkIdx = link.next
+    end
+
+    return results
+end
+
+-- Check if a link represents an off-mesh connection (jump, teleport, etc.)
+-- Off-mesh polygons are indexed in tile.offMeshByPoly
+local function is_offmesh_link(tile, targetPoly)
+    if not tile.offMeshByPoly or not targetPoly or targetPoly <= 0 then
+        return false
+    end
+    return tile.offMeshByPoly[targetPoly] ~= nil
+end
+
+-- Get off-mesh connection data for a polygon
+-- Returns the connection struct or nil if not an off-mesh polygon
+local function get_offmesh_connection(tile, poly)
+    if not tile.offMeshByPoly or not tile.offMeshConnections then
+        return nil
+    end
+    local connIdx = tile.offMeshByPoly[poly]
+    if not connIdx then
+        return nil
+    end
+    return tile.offMeshConnections[connIdx]
+end
+
+-- =========================
 -- Edge Avoidance Helper
 -- =========================
 
