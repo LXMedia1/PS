@@ -607,6 +607,15 @@ local OFFMESH_BASE_PENALTY = 2.0
 local OFFMESH_NARROW_RADIUS = 1.0    -- Connections with radius below this get penalty
 local OFFMESH_NARROW_PENALTY = 1.5   -- Additional multiplier for narrow connections
 
+-- Transition type names for path output (maps userId to human-readable strings)
+local OFFMESH_TYPE_NAME = {
+    [OFFMESH_TYPE.WALK] = "WALK",
+    [OFFMESH_TYPE.JUMP] = "JUMP",
+    [OFFMESH_TYPE.TELEPORT] = "TELEPORT",
+    [OFFMESH_TYPE.LADDER] = "LADDER",
+    [OFFMESH_TYPE.ELEVATOR] = "ELEVATOR",
+}
+
 local function step_cost(tileA, polyA, tileB, polyB)
     -- Get polygon centers
     local ax, ay, az = tileA.pCx[polyA], tileA.pCy[polyA], tileA.pCz[polyA]
@@ -2269,6 +2278,49 @@ local function fixWaypointHeights(waypoints, owners, polyPath, world, startPos, 
 end
 
 -- =========================
+-- Transition Type Annotation
+-- =========================
+
+-- Annotate waypoints with transition type based on their owner polygon
+-- Waypoints on off-mesh polygons get a transitionType field (WALK, JUMP, TELEPORT, LADDER, ELEVATOR)
+-- Regular walkable waypoints do not get a transitionType field (nil = normal walkable)
+-- Parameters:
+--   waypoints: array of {x, y, z} waypoints to annotate
+--   owners: parallel array of polyPath indices (owner polygon for each waypoint)
+--   polyPath: array of nodeIds from A* search
+--   world: tile world data
+local function annotate_waypoint_transitions(waypoints, owners, polyPath, world)
+    if not waypoints or not owners or not polyPath or not world then
+        return
+    end
+
+    for i, wp in ipairs(waypoints) do
+        local ownerIdx = owners[i]
+        if ownerIdx and ownerIdx > 0 and ownerIdx <= #polyPath then
+            local nodeId = polyPath[ownerIdx]
+            local tileId, poly = decode_node(nodeId)
+            local tile = world.tilesById[tileId]
+
+            if tile and is_offmesh_poly(tile, poly) then
+                -- Get the off-mesh connection data
+                local conn = get_offmesh_connection(tile, poly)
+                if conn then
+                    -- Determine transition type from connection's userId
+                    local connType = conn.userId or OFFMESH_TYPE.WALK
+                    local typeName = OFFMESH_TYPE_NAME[connType]
+                    if typeName then
+                        wp.transitionType = typeName
+                    else
+                        -- Unknown type - default to JUMP for off-mesh connections
+                        wp.transitionType = "JUMP"
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- =========================
 -- Funnel Algorithm
 -- =========================
 
@@ -2281,7 +2333,9 @@ local PATH_MODE = "corridor"
 
 -- startPos: {x, y, z}
 -- endPos: {x, y, z}
--- Returns: array of {x, y, z} waypoints
+-- Returns: array of {x, y, z, transitionType?} waypoints
+-- transitionType is only present for off-mesh connections: "WALK", "JUMP", "TELEPORT", "LADDER", "ELEVATOR"
+-- Regular walkable segments have no transitionType field (nil)
 function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
     local world = self.world
     maxPts = maxPts or 256
@@ -2307,6 +2361,9 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
         -- Fix Z heights using polygon ownership
         fixWaypointHeights(out, owners, polyPath, world, startPos, self)
 
+        -- Annotate waypoints with transition types for off-mesh connections
+        annotate_waypoint_transitions(out, owners, polyPath, world)
+
         return out
     end
 
@@ -2324,15 +2381,20 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
         -- Fix Z heights using polygon ownership (clamps XY if pushed outside)
         fixWaypointHeights(out, owners, polyPath, world, startPos, self)
 
+        -- Annotate waypoints with transition types for off-mesh connections
+        annotate_waypoint_transitions(out, owners, polyPath, world)
+
         return out
     end
 
     -- PORTAL MODE: Use portal midpoints (fallback, most waypoints)
     if PATH_MODE == "portal" then
         local out = {}
+        local owners = {}
 
-        -- Start waypoint
+        -- Start waypoint (owner = first polygon)
         out[1] = {x = startPos.x, y = startPos.y, z = startPos.z}
+        owners[1] = 1
 
         -- Add portal midpoints for each polygon transition
         for i = 1, #polyPath - 1 do
@@ -2351,11 +2413,16 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
                 end
 
                 out[#out + 1] = {x = midX, y = midY, z = midZ}
+                owners[#out] = i + 1  -- Portal enters polygon i+1
             end
         end
 
-        -- End waypoint
+        -- End waypoint (owner = last polygon)
         out[#out + 1] = {x = endPos.x, y = endPos.y, z = endPos.z}
+        owners[#out] = #polyPath
+
+        -- Annotate waypoints with transition types for off-mesh connections
+        annotate_waypoint_transitions(out, owners, polyPath, world)
 
         return out
     end
@@ -2506,6 +2573,9 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
             wp.z = startPos.z + 0.5
         end
     end
+
+    -- Annotate waypoints with transition types for off-mesh connections
+    annotate_waypoint_transitions(out, owners, polyPath, world)
 
     return out
 end
@@ -2838,10 +2908,14 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
     -- which uses raw tile detail mesh data for accurate terrain heights (like wireframe)
     -- The old SoA-based height sampling here was less accurate and is no longer needed
 
-    -- Log first few waypoints for debug
+    -- Log first few waypoints for debug (including transitionType if present)
     for i = 1, math.min(5, #waypoints) do
         local wp = waypoints[i]
-        dbg(string.format("  WP[%d]: (%.1f, %.1f, %.1f)", i, wp.x, wp.y, wp.z or 0))
+        if wp.transitionType then
+            dbg(string.format("  WP[%d]: (%.1f, %.1f, %.1f) [%s]", i, wp.x, wp.y, wp.z or 0, wp.transitionType))
+        else
+            dbg(string.format("  WP[%d]: (%.1f, %.1f, %.1f)", i, wp.x, wp.y, wp.z or 0))
+        end
     end
 
     -- Total time and summary
