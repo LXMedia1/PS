@@ -576,7 +576,7 @@ local MAX_WALKABLE_SLOPE_DOWN = 1.2  -- ~50 degrees down (steeper allowed going 
 local MAX_WAYPOINT_SLOPE = 0.6       -- Max slope between waypoints (~31 degrees)
 
 -- Penalty multiplier for polygons near boundaries (walls/cliffs/edges)
-local BOUNDARY_PENALTY = 8.0  -- Strong preference for interior polygons
+local BOUNDARY_PENALTY = 1.2  -- Slight preference for interior polygons (was 8.0, too aggressive)
 
 -- =========================
 -- Off-Mesh Connection Cost Constants
@@ -878,8 +878,13 @@ function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, max
         -- Off-mesh polygons (jumps, teleports, etc.) connect via internal links (side=0xFF)
         -- rather than via edge neighbors. We check internal links to enable pathfinding
         -- across non-walkable transitions.
+        -- ROOT CAUSE FIX: Only process internal links for actual off-mesh polygons
+        -- Regular walkable polygons should NOT use internal links
 
-        local internalLinks = get_internal_links(curTile, curPoly)
+        local internalLinks = {}
+        if is_offmesh_poly(curTile, curPoly) then
+            internalLinks = get_internal_links(curTile, curPoly)
+        end
         for _, linkData in ipairs(internalLinks) do
             local nTileId = linkData.targetTileId
             local nPoly = linkData.targetPoly
@@ -1557,6 +1562,12 @@ local function stringPull(portalsL, portalsR)
             else
                 -- Right crosses left - emit left vertex and restart
                 pts[#pts + 1] = {x = portalLeft.x, y = portalLeft.y, z = portalLeft.z}
+                -- Check if we just added the final portal (destination)
+                local endPortal = portalsL[#portalsL]
+                if math.abs(portalLeft.x - endPortal.x) < 0.001 and
+                   math.abs(portalLeft.y - endPortal.y) < 0.001 then
+                    return pts  -- Reached destination, stop
+                end
                 portalApex = portalLeft
                 apexIndex = leftIndex
                 portalLeft = portalApex
@@ -1577,6 +1588,12 @@ local function stringPull(portalsL, portalsR)
             else
                 -- Left crosses right - emit right vertex and restart
                 pts[#pts + 1] = {x = portalRight.x, y = portalRight.y, z = portalRight.z}
+                -- Check if we just added the final portal (destination)
+                local endPortal = portalsL[#portalsL]
+                if math.abs(portalRight.x - endPortal.x) < 0.001 and
+                   math.abs(portalRight.y - endPortal.y) < 0.001 then
+                    return pts  -- Reached destination, stop
+                end
                 portalApex = portalRight
                 apexIndex = rightIndex
                 portalLeft = portalApex
@@ -1590,9 +1607,12 @@ local function stringPull(portalsL, portalsR)
         i = i + 1
     end
 
-    -- Add end point
+    -- Add end point (only if not already added)
     local lastL = portalsL[#portalsL]
-    pts[#pts + 1] = {x = lastL.x, y = lastL.y, z = lastL.z}
+    local lastPt = pts[#pts]
+    if not lastPt or math.abs(lastPt.x - lastL.x) > 0.001 or math.abs(lastPt.y - lastL.y) > 0.001 then
+        pts[#pts + 1] = {x = lastL.x, y = lastL.y, z = lastL.z}
+    end
 
     return pts
 end
@@ -2883,15 +2903,92 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
         return {success = false, error = err, expansions = expansions}
     end
 
-    -- Log poly path
+    -- Log poly path with connection details
     dbg(string.format("Poly path: %d polygons", #polyPath))
     if #polyPath <= 20 then
         for i, nodeId in ipairs(polyPath) do
-            local tid = math.floor(nodeId / 20000)
-            local pid = nodeId - tid * 20000
+            local tid, pid = decode_node(nodeId)
             local t = world.tilesById[tid]
-            if t then
-                dbg(string.format("  [%d] tile=%d poly=%d Z=%.1f", i, tid, pid, t.pCz[pid] or 0))
+            if t and t.pCz then
+                local polyZ = t.pCz[pid] or 0
+                dbg(string.format("  [%d] tile=%d poly=%d Z=%.1f", i, tid, pid, polyZ))
+
+                -- Check connection type to next polygon
+                if i < #polyPath then
+                    local success, errMsg = pcall(function()
+                        local nextNodeId = polyPath[i + 1]
+                        local nextTid, nextPid = decode_node(nextNodeId)
+
+                        -- Check if it's an off-mesh connection
+                        local isOffMesh = is_offmesh_poly(t, pid)
+                        local nextTile = world.tilesById[nextTid]
+                        local isNextOffMesh = nextTile and is_offmesh_poly(nextTile, nextPid)
+
+                        if isOffMesh or isNextOffMesh then
+                            dbg(string.format("      -> [%d] via OFF-MESH CONNECTION", i + 1))
+                        else
+                            -- Check if they share an edge
+                            local x0, y0, x1, y1 = self:get_transition_edge(tid, pid, nextTid, nextPid)
+                            if x0 then
+                                dbg(string.format("      -> [%d] via shared edge at (%.1f,%.1f)-(%.1f,%.1f)",
+                                    i + 1, x0, y0, x1, y1))
+                            else
+                                -- NO SHARED EDGE - This is a bug! Log detailed info
+                                dbg(string.format("      -> [%d] via UNKNOWN CONNECTION (NO SHARED EDGE!)", i + 1))
+
+                                -- Log all neighbors of current polygon to understand the issue
+                                local base = (pid - 1) * 6
+                                local nv = t.pVertCount[pid]
+                                dbg(string.format("         DEBUG: Poly %d has %d vertices, checking ALL edges:", pid, nv))
+                                for e = 1, nv do
+                                    local nei = t.pNeis[base + e]
+                                    if nei == 0 then
+                                        dbg(string.format("         Edge %d: NO NEIGHBOR (boundary edge)", e))
+                                    elseif nei < 0x8000 then
+                                        dbg(string.format("         Edge %d: intra-tile neighbor = %d", e, nei))
+                                    else
+                                        local extTid = t.extToTile and t.extToTile[base + e] or 0
+                                        local extPid = t.extToPoly and t.extToPoly[base + e] or 0
+                                        dbg(string.format("         Edge %d: cross-tile neighbor = tile %d, poly %d (nei=0x%X)",
+                                            e, extTid, extPid, nei))
+                                    end
+                                end
+                                -- Check for internal links (off-mesh connections)
+                                dbg(string.format("         Checking internal links from poly %d:", pid))
+                                local internalLinks = get_internal_links(t, pid)
+                                if #internalLinks > 0 then
+                                    for idx, linkData in ipairs(internalLinks) do
+                                        local linkTid = linkData.targetTileId
+                                        if linkTid == 0 then linkTid = tid end
+                                        dbg(string.format("         Internal link %d: -> tile %d, poly %d",
+                                            idx, linkTid, linkData.targetPoly))
+                                        if linkData.targetPoly == nextPid then
+                                            dbg(string.format("         ^^^ THIS IS THE CONNECTION TO POLY %d! (internal link)", nextPid))
+                                        end
+                                    end
+                                else
+                                    dbg(string.format("         No internal links found"))
+                                end
+
+                                -- Also check reverse: does poly 546 have a link back?
+                                dbg(string.format("         Checking reverse: does poly %d list poly %d as neighbor?", nextPid, pid))
+                                local nextBase = (nextPid - 1) * 6
+                                local nextNv = nextTile.pVertCount[nextPid]
+                                for e = 1, nextNv do
+                                    local nei = nextTile.pNeis[nextBase + e]
+                                    if nei == pid then
+                                        dbg(string.format("         YES! Poly %d edge %d -> poly %d", nextPid, e, pid))
+                                    end
+                                end
+                            end
+                        end
+                    end)
+                    if not success then
+                        dbg(string.format("      -> [%d] ERROR checking connection: %s", i + 1, tostring(errMsg)))
+                    end
+                end
+            else
+                dbg(string.format("  [%d] tile=%d poly=%d (tile not loaded or invalid)", i, tid, pid))
             end
         end
     end
@@ -2905,6 +3002,13 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
         {x = endX, y = endY, z = endZ}
     )
     local funnelTime = (core.cpu_ticks() - startTime) / (core.cpu_ticks_per_second() / 1000)
+
+    -- Check if waypoints generation failed (e.g., path too steep)
+    if not waypoints then
+        dbg("ERROR: poly_path_to_waypoints returned nil (path rejected)")
+        write_path_debug(debugLines)
+        return {success = false, error = "path_too_steep"}
+    end
 
     perf.funnel = funnelTime
     dbg(string.format("[PERF] Funnel: %.2f ms (%d waypoints)", funnelTime, #waypoints))
