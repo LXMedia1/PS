@@ -25,6 +25,7 @@ local menu_elements = {
     wireframe_enabled = core.menu.checkbox(false, "lx_nav_wireframe"),  -- Default OFF for production
     wireframe_range = core.menu.slider_int(10, 100, 50, "lx_nav_wireframe_range"),
     wireframe_bvnodes = core.menu.checkbox(false, "lx_nav_bvnodes"),
+    wireframe_penalty_zones = core.menu.checkbox(false, "lx_nav_penalty_zones"),
     -- Pathfinding controls
     path_tree = core.menu.tree_node(),
     path_enabled = core.menu.checkbox(false, "lx_nav_path_enabled"),
@@ -2751,10 +2752,12 @@ local function on_render()
     local wireframe_enabled = menu_elements.wireframe_enabled:get_state()
     local wireframe_range = menu_elements.wireframe_range:get()
     local bvnodes_enabled = menu_elements.wireframe_bvnodes:get_state()
+    local penalty_zones_enabled = menu_elements.wireframe_penalty_zones:get_state()
 
     Wireframe.set_enabled(wireframe_enabled)
     Wireframe.set_range(wireframe_range)
     Wireframe.set_bvnodes_enabled(bvnodes_enabled)
+    Wireframe.set_penalty_zones_enabled(penalty_zones_enabled)
 
     -- Render wireframe
     if wireframe_enabled then
@@ -2855,6 +2858,7 @@ local function on_render_menu()
             menu_elements.wireframe_enabled:render("Enable Wireframe")
             menu_elements.wireframe_range:render("Draw Range (yards)")
             menu_elements.wireframe_bvnodes:render("Show BVNodes (spatial tree)")
+            menu_elements.wireframe_penalty_zones:render("Show Penalty Zones (pathfinding cost)")
         end)
 
         -- Pathfinding submenu

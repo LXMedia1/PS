@@ -4,6 +4,7 @@
 
 local Debug = require("modules/debug")
 local TileManager = require("modules/tile_manager")
+local DrawPolygon = require("modules/draw_polygon")
 
 local color = require("common/color")
 local vec3 = require("common/geometry/vector_3")
@@ -29,6 +30,7 @@ local CONFIG = {
     draw_edges = true,         -- Draw polygon edges (WALLS in orange/red)
     draw_centers = false,      -- Draw center points
     draw_offmesh = true,       -- Draw off-mesh connections (jump/teleport links)
+    draw_penalty_zones = false,-- Draw pathfinding penalty zones (cost visualization)
     fill_color = color.new(0, 200, 100, 60),       -- Semi-transparent green fill
     edge_color = color.new(0, 255, 100, 200),      -- Green edges
     edge_thickness = 1.5,
@@ -224,7 +226,7 @@ local function get_detail_vertex(tile, poly, polyIndex, vertexIndex)
 end
 
 -- Draw polygon using detail triangles (finer terrain following)
-local function draw_polygon_detail(tile, poly, polyIndex, player_pos, wall_segments)
+local function draw_polygon_detail(tile, poly, polyIndex, player_pos, penalty_segments, all_tiles)
     if not poly.center then
         return false
     end
@@ -267,11 +269,11 @@ local function draw_polygon_detail(tile, poly, polyIndex, player_pos, wall_segme
         local vc = poly.vertCount
         local v0 = verts[1]
         if v0 then
-            local p0 = vec3.new(v0.x, v0.y, v0.z)
             for i = 2, vc - 1 do
                 local v1 = verts[i]
                 local v2 = verts[i + 1]
                 if v1 and v2 then
+                    local p0 = vec3.new(v0.x, v0.y, v0.z)
                     local p1 = vec3.new(v1.x, v1.y, v1.z)
                     local p2 = vec3.new(v2.x, v2.y, v2.z)
                     core.graphics.triangle_3d_filled(p0, p1, p2, CONFIG.fill_color)
@@ -281,90 +283,9 @@ local function draw_polygon_detail(tile, poly, polyIndex, player_pos, wall_segme
         end
     end
 
-    -- Draw polygon edges (boundary)
-    if CONFIG.draw_edges and poly.worldVerts then
-        local verts = poly.worldVerts
-        local vc = poly.vertCount
-        local clearance = 1.0  -- 1 yard inward
-
-        -- Process all edges
-        for i = 1, vc do
-            local v1 = verts[i]
-            local v2 = verts[(i % vc) + 1]
-
-            if v1 and v2 then
-                local p1 = vec3.new(v1.x, v1.y, v1.z)
-                local p2 = vec3.new(v2.x, v2.y, v2.z)
-
-                -- Get neighbor from parsed polygon data
-                local nei = 0
-                if poly.neis and poly.neis[i] then
-                    nei = poly.neis[i]
-                end
-
-                local edge_color = CONFIG.edge_color
-                local edge_thickness = CONFIG.edge_thickness
-
-                -- Wall edges (no neighbor) - draw in THICK ORANGE/RED
-                if nei == 0 then
-                    edge_color = color.new(255, 80, 0, 255)  -- Orange/red for walls
-                    edge_thickness = 3.0  -- Thicker for visibility
-
-                    -- Process wall edge for simulated inner wall
-                    if poly.center and wall_segments then
-                        local ex = v2.x - v1.x
-                        local ey = v2.y - v1.y
-                        local elen = math.sqrt(ex * ex + ey * ey)
-                        local midX = (v1.x + v2.x) / 2
-                        local midY = (v1.y + v2.y) / 2
-
-                        if elen > 0.1 then
-                            -- Perpendicular direction
-                            local perpX = -ey / elen
-                            local perpY = ex / elen
-
-                            -- Vector from edge midpoint to polygon center
-                            local toCenterX = poly.center.x - midX
-                            local toCenterY = poly.center.y - midY
-                            local distToCenter = math.sqrt(toCenterX * toCenterX + toCenterY * toCenterY)
-
-                            -- Only process if polygon is large enough
-                            if distToCenter > clearance * 1.5 then
-                                -- Ensure perpendicular points toward center
-                                local dot = perpX * toCenterX + perpY * toCenterY
-                                if dot < 0 then
-                                    perpX = -perpX
-                                    perpY = -perpY
-                                end
-
-                                -- Calculate shifted vertices
-                                local s1 = {x = v1.x + perpX * clearance, y = v1.y + perpY * clearance, z = v1.z}
-                                local s2 = {x = v2.x + perpX * clearance, y = v2.y + perpY * clearance, z = v2.z}
-
-                                -- Draw the shifted wall segment
-                                local sp1 = vec3.new(s1.x, s1.y, s1.z)
-                                local sp2 = vec3.new(s2.x, s2.y, s2.z)
-                                core.graphics.line_3d(sp1, sp2, color.new(255, 255, 0, 200), 2.0)
-
-                                -- Store segment with original and shifted positions
-                                table.insert(wall_segments, {
-                                    orig1 = {x = v1.x, y = v1.y, z = v1.z},
-                                    orig2 = {x = v2.x, y = v2.y, z = v2.z},
-                                    shifted1 = s1,
-                                    shifted2 = s2
-                                })
-                            end
-                        end
-                    end
-                -- External edges (cross-tile) - check if resolved
-                elseif nei >= 0x8000 then
-                    -- External edges are blue (cross-tile connections)
-                    edge_color = color.new(0, 100, 255, 255)  -- Blue for tile boundaries
-                end
-
-                core.graphics.line_3d(p1, p2, edge_color, edge_thickness)
-            end
-        end
+    -- Draw penalty zones (LX_Nav2 style - colored bands around walls)
+    if CONFIG.draw_penalty_zones then
+        DrawPolygon.draw_penalty_zones(poly)
     end
 
     -- Draw center point
@@ -772,6 +693,92 @@ local function draw_polygon(poly, player_pos)
     return true
 end
 
+-- Draw penalty band segments and connect them at corners
+local function draw_penalty_bands(penalty_segments)
+    if not CONFIG.draw_penalty_zones or not penalty_segments or #penalty_segments == 0 then
+        return
+    end
+
+    local height_offset = CONFIG.height_offset
+
+    -- Helper: Check if two vertices match
+    local function vertices_match(v1, v2, tolerance)
+        local dx = v2.x - v1.x
+        local dy = v2.y - v1.y
+        local dz = v2.z - v1.z
+        return math.sqrt(dx*dx + dy*dy + dz*dz) < tolerance
+    end
+
+    local vertex_tolerance = 1.0
+
+    -- Group segments by layer for proper ordering (red closest to wall, then orange, then yellow)
+    local segments_by_layer = {{}, {}, {}}  -- [1]=red, [2]=orange, [3]=yellow
+    for _, seg in ipairs(penalty_segments) do
+        table.insert(segments_by_layer[seg.layer], seg)
+    end
+
+    -- Draw each layer in order (red first, yellow last)
+    for layer = 1, 3 do
+        local segments = segments_by_layer[layer]
+
+        -- Draw all segments for this layer
+        for _, seg in ipairs(segments) do
+            local p0_inner = vec3.new(seg.inner1.x, seg.inner1.y, seg.inner1.z + height_offset)
+            local p1_inner = vec3.new(seg.inner2.x, seg.inner2.y, seg.inner2.z + height_offset)
+            local p0_outer = vec3.new(seg.outer1.x, seg.outer1.y, seg.outer1.z + height_offset)
+            local p1_outer = vec3.new(seg.outer2.x, seg.outer2.y, seg.outer2.z + height_offset)
+
+            -- Draw rectangle as two triangles
+            core.graphics.triangle_3d_filled(p0_inner, p1_inner, p1_outer, seg.color)
+            core.graphics.triangle_3d_filled(p0_inner, p1_outer, p0_outer, seg.color)
+        end
+
+        -- Connect segments at corners (like yellow walls)
+        local connections_made = {}
+        for i = 1, #segments do
+            local seg1 = segments[i]
+            for j = 1, #segments do
+                if i ~= j then
+                    local key1 = i .. "_" .. j
+                    local key2 = j .. "_" .. i
+
+                    if not connections_made[key1] and not connections_made[key2] then
+                        local seg2 = segments[j]
+
+                        -- Check if outer edges connect (farthest from wall)
+                        if vertices_match(seg1.outer2, seg2.outer1, vertex_tolerance) then
+                            -- Draw connecting triangle at corner
+                            local p1 = vec3.new(seg1.outer2.x, seg1.outer2.y, seg1.outer2.z + height_offset)
+                            local p2 = vec3.new(seg2.outer1.x, seg2.outer1.y, seg2.outer1.z + height_offset)
+                            local corner = vec3.new(seg1.orig2.x, seg1.orig2.y, seg1.orig2.z + height_offset)
+                            core.graphics.triangle_3d_filled(p1, p2, corner, seg1.color)
+                            connections_made[key1] = true
+                        elseif vertices_match(seg1.outer2, seg2.outer2, vertex_tolerance) then
+                            local p1 = vec3.new(seg1.outer2.x, seg1.outer2.y, seg1.outer2.z + height_offset)
+                            local p2 = vec3.new(seg2.outer2.x, seg2.outer2.y, seg2.outer2.z + height_offset)
+                            local corner = vec3.new(seg1.orig2.x, seg1.orig2.y, seg1.orig2.z + height_offset)
+                            core.graphics.triangle_3d_filled(p1, p2, corner, seg1.color)
+                            connections_made[key1] = true
+                        elseif vertices_match(seg1.outer1, seg2.outer1, vertex_tolerance) then
+                            local p1 = vec3.new(seg1.outer1.x, seg1.outer1.y, seg1.outer1.z + height_offset)
+                            local p2 = vec3.new(seg2.outer1.x, seg2.outer1.y, seg2.outer1.z + height_offset)
+                            local corner = vec3.new(seg1.orig1.x, seg1.orig1.y, seg1.orig1.z + height_offset)
+                            core.graphics.triangle_3d_filled(p1, p2, corner, seg1.color)
+                            connections_made[key1] = true
+                        elseif vertices_match(seg1.outer1, seg2.outer2, vertex_tolerance) then
+                            local p1 = vec3.new(seg1.outer1.x, seg1.outer1.y, seg1.outer1.z + height_offset)
+                            local p2 = vec3.new(seg2.outer2.x, seg2.outer2.y, seg2.outer2.z + height_offset)
+                            local corner = vec3.new(seg1.orig1.x, seg1.orig1.y, seg1.orig1.z + height_offset)
+                            core.graphics.triangle_3d_filled(p1, p2, corner, seg1.color)
+                            connections_made[key1] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
 -- Main render function (called every frame)
 function Wireframe.render()
     if not CONFIG.enabled then
@@ -828,15 +835,15 @@ function Wireframe.render()
     local offmesh_drawn = 0
     local bvnodes_drawn = 0
 
-    -- List of all wall segments with their original vertex positions
-    local wall_segments = {}
-
     Debug.perf_start("draw_all_tiles")
+
+    -- Draw all tiles with distance-based coloring
     for _, tile in pairs(tiles) do  -- pairs instead of ipairs (tiles now have string keys)
         for polyIdx, poly in ipairs(tile.polygons) do
             polys_checked = polys_checked + 1
-            -- Use detail triangles for better terrain following
-            if draw_polygon_detail(tile, poly, polyIdx, player_pos, wall_segments) then
+
+            -- Use detail triangles for better terrain following with distance-based coloring
+            if draw_polygon_detail(tile, poly, polyIdx, player_pos, nil, tiles) then
                 polys_drawn = polys_drawn + 1
                 -- Count detail triangles
                 local detail = tile.detailMeshes and tile.detailMeshes[polyIdx]
@@ -850,72 +857,6 @@ function Wireframe.render()
 
         -- Draw BVNodes (spatial query tree visualization)
         bvnodes_drawn = bvnodes_drawn + draw_bvnodes(tile, player_pos)
-    end
-
-    -- Helper: Check if two vertices are close enough to be considered the same
-    local function vertices_match(v1, v2, tolerance)
-        local dx = v2.x - v1.x
-        local dy = v2.y - v1.y
-        local dz = v2.z - v1.z
-        return math.sqrt(dx*dx + dy*dy + dz*dz) < tolerance
-    end
-
-    -- Helper: Connect two shifted endpoints - ALWAYS connect, no distance check
-    local function connect_endpoints(s1, s2, orig_vertex)
-        -- Use average Z from both endpoints
-        local avgZ = (s1.z + s2.z) / 2
-
-        local dist = math.sqrt((s2.x - s1.x)^2 + (s2.y - s1.y)^2)
-
-        if dist < 2.0 then
-            -- Convex corner - direct connection
-            local p1 = vec3.new(s1.x, s1.y, avgZ)
-            local p2 = vec3.new(s2.x, s2.y, avgZ)
-            core.graphics.line_3d(p1, p2, color.new(255, 255, 0, 200), 2.0)
-        else
-            -- Concave corner - connect via original vertex
-            local corner = vec3.new(orig_vertex.x, orig_vertex.y, avgZ)
-            local p1 = vec3.new(s1.x, s1.y, avgZ)
-            local p2 = vec3.new(s2.x, s2.y, avgZ)
-            core.graphics.line_3d(p1, corner, color.new(255, 255, 0, 200), 2.0)
-            core.graphics.line_3d(p2, corner, color.new(255, 255, 0, 200), 2.0)
-        end
-    end
-
-    -- Connect wall segments at corners
-    local vertex_tolerance = 1.0  -- High tolerance for matching vertices (1 yard)
-    local connections_made = {}  -- Track which pairs are already connected (using key "i_j")
-
-    for i = 1, #wall_segments do
-        local seg1 = wall_segments[i]
-
-        -- Check all other segments (not just those after i)
-        for j = 1, #wall_segments do
-            if i ~= j then
-                local key1 = i .. "_" .. j
-                local key2 = j .. "_" .. i
-
-                -- Skip if this pair already connected
-                if not connections_made[key1] and not connections_made[key2] then
-                    local seg2 = wall_segments[j]
-
-                    -- Check all 4 possible vertex pairings
-                    if vertices_match(seg1.orig2, seg2.orig1, vertex_tolerance) then
-                        connect_endpoints(seg1.shifted2, seg2.shifted1, seg1.orig2)
-                        connections_made[key1] = true
-                    elseif vertices_match(seg1.orig2, seg2.orig2, vertex_tolerance) then
-                        connect_endpoints(seg1.shifted2, seg2.shifted2, seg1.orig2)
-                        connections_made[key1] = true
-                    elseif vertices_match(seg1.orig1, seg2.orig1, vertex_tolerance) then
-                        connect_endpoints(seg1.shifted1, seg2.shifted1, seg1.orig1)
-                        connections_made[key1] = true
-                    elseif vertices_match(seg1.orig1, seg2.orig2, vertex_tolerance) then
-                        connect_endpoints(seg1.shifted1, seg2.shifted2, seg1.orig1)
-                        connections_made[key1] = true
-                    end
-                end
-            end
-        end
     end
 
     Debug.perf_end("draw_all_tiles")
@@ -1087,6 +1028,12 @@ end
 -- Enable/disable cross-tile connection visualization
 function Wireframe.set_cross_tile_enabled(enabled)
     CONFIG.draw_cross_tile = enabled
+end
+
+-- Enable/disable penalty zone visualization
+function Wireframe.set_penalty_zones_enabled(enabled)
+    CONFIG.draw_penalty_zones = enabled
+    DrawPolygon.set_penalty_zones_enabled(enabled)
 end
 
 -- Render cross-tile connections from NavWorld's SoA tiles

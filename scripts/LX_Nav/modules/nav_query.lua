@@ -576,7 +576,15 @@ local MAX_WALKABLE_SLOPE_DOWN = 1.2  -- ~50 degrees down (steeper allowed going 
 local MAX_WAYPOINT_SLOPE = 0.6       -- Max slope between waypoints (~31 degrees)
 
 -- Penalty multiplier for polygons near boundaries (walls/cliffs/edges)
-local BOUNDARY_PENALTY = 1.2  -- Slight preference for interior polygons (was 8.0, too aggressive)
+local BOUNDARY_PENALTY = 1.5  -- Prefer interior polygons over edge paths (balanced)
+
+-- Wall proximity penalty zones (matched to DrawPolygon visualization)
+local PENALTY_ZONE_1_DIST = 1.5    -- 0-1.5 yards from wall (high penalty, red zone)
+local PENALTY_ZONE_1_MULT = 8.0    -- Cost multiplier for zone 1 (strongly avoid)
+local PENALTY_ZONE_2_DIST = 3.0    -- 1.5-3.0 yards from wall (medium penalty, orange zone)
+local PENALTY_ZONE_2_MULT = 5.0    -- Cost multiplier for zone 2 (avoid)
+local PENALTY_ZONE_3_DIST = 4.5    -- 3.0-4.5 yards from wall (low penalty, yellow zone)
+local PENALTY_ZONE_3_MULT = 2.0    -- Cost multiplier for zone 3 (discourage)
 
 -- =========================
 -- Off-Mesh Connection Cost Constants
@@ -670,6 +678,10 @@ local function step_cost(tileA, polyA, tileB, polyB)
         c = c * 1.5  -- Water is slower
     elseif area == NavConstants.Area.DANGER then
         c = c * 20.0  -- Avoid dangerous areas
+    else
+        -- Normal walkable areas: add random variation (0.8 to 1.0)
+        -- This creates natural path variation each pathfinding run
+        c = c * (0.8 + math.random() * 0.2)
     end
 
     -- BOUNDARY PENALTY: Penalize polygons that have boundary edges (walls/cliffs)
@@ -692,13 +704,8 @@ local function step_cost(tileA, polyA, tileB, polyB)
         c = c * (1.0 + (boundaryEdges * (BOUNDARY_PENALTY - 1.0) / nvB))
     end
 
-    -- WALL PROXIMITY PENALTY: Penalize areas within 1 yard of walls (danger zone)
-    -- This makes paths prefer staying inside the yellow simulated inner wall
-    -- AND strongly discourages using narrow passages when wider routes exist
-    local dangerZone = 1.0  -- 1 yard from wall
-    local dangerPenalty = 5.0  -- 5x slower in danger zone (strongly avoid narrow passages)
-
-    -- Find nearest wall distance from polygon B center
+    -- WALL PROXIMITY PENALTY ZONES: Apply multiplicative penalties based on distance to nearest wall
+    -- Matches the visual penalty zones (red/orange/yellow bands in wireframe)
     local nearestWallDist = math.huge
     for e = 1, nvB do
         local nei = tileB.pNeis[baseB + e]
@@ -730,65 +737,18 @@ local function step_cost(tileA, polyA, tileB, polyB)
         end
     end
 
-    -- Apply danger zone penalty if within 1 yard of wall
-    if nearestWallDist < dangerZone then
-        c = c * dangerPenalty
+    -- Apply zone-based multiplicative penalties
+    if nearestWallDist <= PENALTY_ZONE_1_DIST then
+        -- Zone 1: 0-1 yards from wall (red zone, high penalty)
+        c = c * PENALTY_ZONE_1_MULT
+    elseif nearestWallDist <= PENALTY_ZONE_2_DIST then
+        -- Zone 2: 1-2 yards from wall (orange zone, medium penalty)
+        c = c * PENALTY_ZONE_2_MULT
+    elseif nearestWallDist <= PENALTY_ZONE_3_DIST then
+        -- Zone 3: 2-3 yards from wall (yellow zone, low penalty)
+        c = c * PENALTY_ZONE_3_MULT
     end
-
-    -- NARROW CORRIDOR PENALTY: Check if polygon is squeezed between walls (tight passage)
-    -- Count how many walls are nearby (within 3 yards) to detect narrow passages
-    local nearbyWalls = 0
-    for e = 1, nvB do
-        local nei = tileB.pNeis[baseB + e]
-        if nei == 0 then  -- Wall edge
-            local v0 = tileB.pVerts[baseB + e]
-            local v1 = tileB.pVerts[baseB + (e % nvB) + 1]
-            local wx0, wy0 = tileB.vx[v0], tileB.vy[v0]
-            local wx1, wy1 = tileB.vx[v1], tileB.vy[v1]
-
-            -- Find closest point on wall edge to polygon center
-            local edgeX = wx1 - wx0
-            local edgeY = wy1 - wy0
-            local edgeLen = edgeX * edgeX + edgeY * edgeY
-
-            if edgeLen > 0.001 then
-                local t = ((bx - wx0) * edgeX + (by - wy0) * edgeY) / edgeLen
-                t = math.max(0, math.min(1, t))
-
-                local closestX = wx0 + t * edgeX
-                local closestY = wy0 + t * edgeY
-
-                local distSq = (bx - closestX) * (bx - closestX) + (by - closestY) * (by - closestY)
-                local dist = math.sqrt(distSq)
-
-                -- Count walls within 3 yards
-                if dist < 3.0 then
-                    nearbyWalls = nearbyWalls + 1
-                end
-            end
-        end
-    end
-
-    -- If surrounded by walls on 2+ sides within 3 yards, it's a narrow corridor
-    -- If the corridor is less than 1 yard wide (nearestWallDist < 0.5 and walls on multiple sides),
-    -- treat it as unwalkable
-    if nearbyWalls >= 2 and nearestWallDist < 0.5 then
-        -- Corridor narrower than 1 yard - effectively unwalkable
-        return c * 1000.0  -- Make it extremely expensive (nearly impassable)
-    end
-
-    -- Apply escalating penalty for narrow corridors: 2 walls = 3x, 3 walls = 10x, 4+ walls = 50x
-    if nearbyWalls >= 2 then
-        local narrowPenalty = 1.0
-        if nearbyWalls == 2 then
-            narrowPenalty = 3.0  -- Moderately narrow
-        elseif nearbyWalls == 3 then
-            narrowPenalty = 10.0  -- Very narrow
-        else
-            narrowPenalty = 50.0  -- Extremely tight squeeze
-        end
-        c = c * narrowPenalty
-    end
+    -- Beyond 3 yards: no penalty (open space)
 
     return c
 end
@@ -857,7 +817,7 @@ function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, max
     self.searchId = self.searchId + 1
     local sid = self.searchId
 
-    maxExpansions = maxExpansions or 200000  -- Increased for large TILE_STRIDE
+    maxExpansions = maxExpansions or 400000  -- Increased for random cost variation and large TILE_STRIDE
     heap:clear()
 
     local startNode = node_id(startTileId, startPoly)
@@ -954,6 +914,8 @@ function NavQuery:find_poly_path(startTileId, startPoly, endTileId, endPoly, max
 
                                 local hx = dist2D(nTile.pCx[nPoly], nTile.pCy[nPoly],
                                                  goalTile.pCx[endPoly], goalTile.pCy[endPoly])
+                                -- Use actual distance as heuristic (admissible)
+                                -- This ensures A* explores enough to find the truly optimal path
                                 local nf = tentative + hx
                                 f[nb] = nf
 

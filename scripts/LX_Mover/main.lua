@@ -28,7 +28,7 @@ local is_turning_left = false
 local is_turning_right = false
 
 -- Settings
-local waypoint_threshold = 2.5  -- Distance to consider "arrived" (don't stop, just switch)
+local waypoint_threshold = 3.5  -- Distance to consider "arrived" (don't stop, just switch) - higher = smoother flow
 local turn_threshold = 0.15     -- Radians - stop turning when angle diff is small
 
 -- Tab-out detection
@@ -53,45 +53,73 @@ local path_updating = false  -- True when path is being recalculated
 
 -- Path smoothing settings
 local smooth_enabled = true
-local smooth_subdivisions = 3  -- Points to add between each original waypoint (balance between smooth and accurate)
+local smooth_subdivisions = 8  -- Points to add between each original waypoint (higher = smoother curves)
 
 -- Click-to-path mode
 local click_to_path_mode = false
 local prev_mouse_down = false
 
+-- Visualize-only mode (generate path without auto-starting movement)
+local visualize_only = false
+
+-- Show original path (white funnel path before smoothing)
+local show_original_path = false
+
 -----------------------------------------------------------
--- Path Smoothing (Cubic B-spline)
+-- Path Smoothing (Centripetal Catmull-Rom, α = 0.5)
 -----------------------------------------------------------
 
--- Cubic B-spline basis functions
-local function bspline_basis(i, t)
-    if i == 0 then
-        return (1 - t)^3 / 6
-    elseif i == 1 then
-        return (3 * t^3 - 6 * t^2 + 4) / 6
-    elseif i == 2 then
-        return (-3 * t^3 + 3 * t^2 + 3 * t + 1) / 6
-    elseif i == 3 then
-        return t^3 / 6
+-- Calculate knot value for Catmull-Rom (based on distance between points)
+local function get_knot(t_prev, p_prev, p_curr)
+    local dx = p_curr.x - p_prev.x
+    local dy = p_curr.y - p_prev.y
+    local dz = p_curr.z - p_prev.z
+    local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+
+    -- Centripetal: α = 0.5, so we use sqrt(dist)
+    -- Uniform would be: α = 0, so we'd just add 1.0
+    -- Chordal would be: α = 1.0, so we'd use dist
+    local knot_increment = math.sqrt(dist)
+
+    return t_prev + knot_increment
+end
+
+-- Centripetal Catmull-Rom interpolation between p1 and p2 (using p0 and p3 for curvature)
+local function catmull_rom_interpolate(p0, p1, p2, p3, t, t0, t1, t2, t3)
+    -- Avoid division by zero
+    if t1 == t0 or t2 == t1 or t3 == t2 then
+        return {x = p1.x, y = p1.y, z = p1.z}
     end
-    return 0
+
+    -- Catmull-Rom matrix calculation
+    local A1_x = (t1 - t) / (t1 - t0) * p0.x + (t - t0) / (t1 - t0) * p1.x
+    local A1_y = (t1 - t) / (t1 - t0) * p0.y + (t - t0) / (t1 - t0) * p1.y
+    local A1_z = (t1 - t) / (t1 - t0) * p0.z + (t - t0) / (t1 - t0) * p1.z
+
+    local A2_x = (t2 - t) / (t2 - t1) * p1.x + (t - t1) / (t2 - t1) * p2.x
+    local A2_y = (t2 - t) / (t2 - t1) * p1.y + (t - t1) / (t2 - t1) * p2.y
+    local A2_z = (t2 - t) / (t2 - t1) * p1.z + (t - t1) / (t2 - t1) * p2.z
+
+    local A3_x = (t3 - t) / (t3 - t2) * p2.x + (t - t2) / (t3 - t2) * p3.x
+    local A3_y = (t3 - t) / (t3 - t2) * p2.y + (t - t2) / (t3 - t2) * p3.y
+    local A3_z = (t3 - t) / (t3 - t2) * p2.z + (t - t2) / (t3 - t2) * p3.z
+
+    local B1_x = (t2 - t) / (t2 - t0) * A1_x + (t - t0) / (t2 - t0) * A2_x
+    local B1_y = (t2 - t) / (t2 - t0) * A1_y + (t - t0) / (t2 - t0) * A2_y
+    local B1_z = (t2 - t) / (t2 - t0) * A1_z + (t - t0) / (t2 - t0) * A2_z
+
+    local B2_x = (t3 - t) / (t3 - t1) * A2_x + (t - t1) / (t3 - t1) * A3_x
+    local B2_y = (t3 - t) / (t3 - t1) * A2_y + (t - t1) / (t3 - t1) * A3_y
+    local B2_z = (t3 - t) / (t3 - t1) * A2_z + (t - t1) / (t3 - t1) * A3_z
+
+    local C_x = (t2 - t) / (t2 - t1) * B1_x + (t - t1) / (t2 - t1) * B2_x
+    local C_y = (t2 - t) / (t2 - t1) * B1_y + (t - t1) / (t2 - t1) * B2_y
+    local C_z = (t2 - t) / (t2 - t1) * B1_z + (t - t1) / (t2 - t1) * B2_z
+
+    return {x = C_x, y = C_y, z = C_z}
 end
 
--- Cubic B-spline interpolation between 4 control points
-local function bspline_cubic(p0, p1, p2, p3, t)
-    local b0 = bspline_basis(0, t)
-    local b1 = bspline_basis(1, t)
-    local b2 = bspline_basis(2, t)
-    local b3 = bspline_basis(3, t)
-
-    return {
-        x = b0 * p0.x + b1 * p1.x + b2 * p2.x + b3 * p3.x,
-        y = b0 * p0.y + b1 * p1.y + b2 * p2.y + b3 * p3.y,
-        z = b0 * p0.z + b1 * p1.z + b2 * p2.z + b3 * p3.z
-    }
-end
-
--- Smooth a path using Cubic B-splines
+-- Smooth a path using Centripetal Catmull-Rom splines
 local function smooth_path(points, subdivisions, is_loop)
     if #points < 3 then return points end
 
@@ -100,7 +128,7 @@ local function smooth_path(points, subdivisions, is_loop)
 
     -- For each segment between control points
     for i = 1, n - 1 do
-        -- Get 4 control points for B-spline
+        -- Get 4 control points for Catmull-Rom
         local p0, p1, p2, p3
 
         if is_loop then
@@ -116,10 +144,18 @@ local function smooth_path(points, subdivisions, is_loop)
             p3 = points[math.min(n, i + 2)]
         end
 
-        -- Generate interpolated points along the B-spline curve
+        -- Calculate knot values for centripetal parameterization
+        local t0 = 0.0
+        local t1 = get_knot(t0, p0, p1)
+        local t2 = get_knot(t1, p1, p2)
+        local t3 = get_knot(t2, p2, p3)
+
+        -- Generate interpolated points along the Catmull-Rom curve
+        -- We interpolate between p1 and p2
         for j = 0, subdivisions do
-            local t = j / subdivisions
-            local interp = bspline_cubic(p0, p1, p2, p3, t)
+            local t_norm = j / subdivisions
+            local t = t1 + t_norm * (t2 - t1)
+            local interp = catmull_rom_interpolate(p0, p1, p2, p3, t, t0, t1, t2, t3)
             table.insert(smoothed, interp)
         end
     end
@@ -301,7 +337,7 @@ local function request_path_to_saved_position(name)
         return false
     end
 
-    return request_path_to_position(pos)
+    return request_path_to_position(pos, nil)
 end
 
 local function request_path_to_click()
@@ -513,6 +549,8 @@ local function stop_path()
     nav_mode = false
     nav_target_pos = nil
     nav_target_object = nil
+    current_path = nil  -- Clear path visualization when stopped
+    old_path = nil
 end
 
 -----------------------------------------------------------
@@ -521,9 +559,9 @@ end
 
 -- Base movement parameters (tuned for ~7 units/sec walking speed)
 local base_speed = 7
-local base_turn_speed = 0.08  -- Smooth direction changes (was 0.15, too fast)
-local base_look_distance = 10
-local base_threshold = 0.5  -- Reach waypoint before switching (was 2.5, caused corner cutting)
+local base_turn_speed = 0.18  -- Smooth direction changes (higher = smoother, more responsive turning)
+local base_look_distance = 12  -- Look further ahead for smoother anticipation
+local base_threshold = 3.5  -- Balance between corner cutting and circling (higher = smoother flow)
 
 local function update_movement()
     if state ~= STATE.MOVING then return end
@@ -829,8 +867,8 @@ local function render_path()
         end
     end
 
-    -- Draw original funnel path (before B-spline smoothing) in white
-    if current_path.original_points and #current_path.original_points > 0 then
+    -- Draw original funnel path (before B-spline smoothing) in white (optional)
+    if show_original_path and current_path.original_points and #current_path.original_points > 0 then
         -- Convert original points to screen coordinates
         for i = 1, #current_path.original_points do
             local p = current_path.original_points[i]
@@ -909,7 +947,11 @@ local function refresh_saved_position_buttons()
             style = "secondary",
             on_click = function()
                 if request_path_to_saved_position(name) then
-                    start_path()
+                    if not visualize_only then
+                        start_path()
+                    else
+                        core.log("[LX_Mover] Path generated (visualize-only mode)")
+                    end
                 end
             end
         })
@@ -961,6 +1003,7 @@ local function init()
     local Label = LX_UI.Label
     local Button = LX_UI.Button
     local ProgressBar = LX_UI.ProgressBar
+    local Checkbox = LX_UI.Checkbox
 
     local y = 38
 
@@ -1046,6 +1089,33 @@ local function init()
     menu:add_component(header_nav)
     y = y + 24
 
+    -- Visualize Only checkbox
+    ui.visualize_only_cb = Checkbox:new({
+        text = "Visualize Only (no auto-start)",
+        x = p,
+        y = y,
+        checked = visualize_only,
+        on_change = function(comp, value)
+            visualize_only = value
+            core.log("[LX_Mover] Visualize-only mode: " .. tostring(value))
+        end
+    })
+    menu:add_component(ui.visualize_only_cb)
+    y = y + 22
+
+    -- Show Original Path checkbox
+    ui.show_original_cb = Checkbox:new({
+        text = "Show Original Path (white)",
+        x = p,
+        y = y,
+        checked = show_original_path,
+        on_change = function(comp, value)
+            show_original_path = value
+        end
+    })
+    menu:add_component(ui.show_original_cb)
+    y = y + 22
+
     -- Nav path buttons (3 buttons in a row)
     local nav_btn_w = (menu_w - p*2 - 12) / 3
 
@@ -1057,7 +1127,11 @@ local function init()
         height = btn_h - 4,
         on_click = function()
             if request_path_to_target() then
-                start_path()
+                if not visualize_only then
+                    start_path()
+                else
+                    core.log("[LX_Mover] Path generated (visualize-only mode)")
+                end
             end
         end
     })
@@ -1196,8 +1270,12 @@ local function handle_click_to_path()
 
             -- Request path to clicked position
             if request_path_to_position(world_pos, nil) then
-                -- Start moving
-                start_path()
+                -- Start moving (unless visualize-only mode)
+                if not visualize_only then
+                    start_path()
+                else
+                    core.log("[LX_Mover] Path generated (visualize-only mode)")
+                end
             end
 
             click_to_path_mode = false
