@@ -17,11 +17,9 @@ local menu = nil
 local initialized = false
 local ui = {}
 
--- Path data
-local saved_paths = {}          -- List of path names from manifest
-local current_path = nil        -- Currently loaded path {name, path_type, points}
+-- Path data (for nav mode)
+local current_path = nil        -- Currently active path from LX_Nav {points}
 local current_index = 1         -- Current waypoint index
-local path_direction = 1        -- 1 = forward, -1 = backward (for pingpong)
 
 -- Movement state
 local state = STATE.IDLE
@@ -32,21 +30,16 @@ local is_turning_right = false
 -- Settings
 local waypoint_threshold = 2.5  -- Distance to consider "arrived" (don't stop, just switch)
 local turn_threshold = 0.15     -- Radians - stop turning when angle diff is small
-local loop_enabled = true
 
 -- Tab-out detection
 local INPUT_BIT_FORWARD = 0x10    -- Input bit for move_forward
 local is_tabbed_out = false       -- True when game window loses focus
 
--- Path file constants (same as PathRecorder)
-local PATH_FOLDER = "pathrecorder/"
-local MANIFEST_FILE = "pathrecorder/_manifest"
-
 -- Saved positions constants
 local POSITIONS_FILE = "lx_mover_positions"
 
--- Nav path mode
-local nav_mode = false  -- true = using LX_Nav pathfinding, false = using recorded paths
+-- Nav path mode (always uses LX_Nav now)
+local nav_mode = true  -- Always use LX_Nav pathfinding
 local nav_target_pos = nil  -- Target position for nav mode
 local nav_target_object = nil  -- Target object if following a moving target
 local nav_last_update = 0  -- Last time path was updated
@@ -60,7 +53,11 @@ local path_updating = false  -- True when path is being recalculated
 
 -- Path smoothing settings
 local smooth_enabled = true
-local smooth_subdivisions = 5  -- Points to add between each original waypoint
+local smooth_subdivisions = 3  -- Points to add between each original waypoint (balance between smooth and accurate)
+
+-- Click-to-path mode
+local click_to_path_mode = false
+local prev_mouse_down = false
 
 -----------------------------------------------------------
 -- Path Smoothing (Cubic B-spline)
@@ -230,7 +227,14 @@ local function request_nav_path(target_pos)
     end
 
     -- Request path from LX_Nav
-    local result = LX_Nav.request_path(target_pos)
+    -- Check if player is mounted and adjust wall distance
+    local player = core.object_manager.get_local_player()
+    local wall_distance = 2.0  -- Default: 2 yards from walls
+    if player and player:is_mounted() then
+        wall_distance = 4.0  -- Mounted: 4 yards from walls for wider clearance
+    end
+
+    local result = LX_Nav.request_path(target_pos, wall_distance)
     if not result or not result.path then
         core.log_error("[LX_Mover] Failed to get path from LX_Nav")
         return nil
@@ -249,15 +253,16 @@ local function request_nav_path(target_pos)
         original_points = original_points
     }
 
-    -- Apply smoothing if enabled (same as recorded paths)
+    -- Apply B-spline smoothing after wall-aware pathfinding
+    -- The funnel path respects navmesh, and B-spline adds final smoothing
     if smooth_enabled and #original_points >= 3 then
-        path_data.points = smooth_path(original_points, smooth_subdivisions, false)  -- false = not a loop
+        path_data.points = smooth_path(original_points, smooth_subdivisions, false)
     else
         path_data.points = original_points
     end
 
-    core.log(string.format("[LX_Mover] Nav path created with %d waypoints (%d after smoothing)",
-        #original_points, #path_data.points))
+    core.log(string.format("[LX_Mover] Nav path created with %d waypoints (%d after smoothing, wall_dist=%.1f)",
+        #original_points, #path_data.points, wall_distance))
     return path_data
 end
 
@@ -272,7 +277,6 @@ local function request_path_to_position(target_pos, target_object)
 
         current_path = path_data
         current_index = 1
-        path_direction = 1
         nav_mode = true
         nav_target_pos = target_pos
         nav_target_object = target_object  -- Store object reference if following a moving target
@@ -326,71 +330,6 @@ local function request_path_to_target()
     end
 
     return request_path_to_position(target_pos, target)
-end
-
------------------------------------------------------------
--- Path Loading (from PathRecorder format)
------------------------------------------------------------
-
-local function load_path(name)
-    local filename = PATH_FOLDER .. name
-    local content = core.read_data_file(filename)
-
-    if not content or content == "" then
-        core.log_error("[LX_Mover] Could not load path: " .. name)
-        return nil
-    end
-
-    local path_data = {
-        name = name,
-        path_type = "loop",
-        points = {},
-        original_points = {}  -- Keep original for reference
-    }
-
-    -- Extract path_type
-    local pt = content:match('"path_type":"([^"]+)"')
-    if pt then path_data.path_type = pt end
-
-    -- Extract points
-    for x, y, z in content:gmatch('"x":([%d%.%-]+),"y":([%d%.%-]+),"z":([%d%.%-]+)') do
-        table.insert(path_data.original_points, {
-            x = tonumber(x),
-            y = tonumber(y),
-            z = tonumber(z)
-        })
-    end
-
-    local original_count = #path_data.original_points
-
-    -- Apply smoothing if enabled
-    if smooth_enabled and original_count >= 3 then
-        local is_loop = (path_data.path_type == "loop") or loop_enabled
-        path_data.points = smooth_path(path_data.original_points, smooth_subdivisions, is_loop)
-    else
-        path_data.points = path_data.original_points
-    end
-
-    return path_data
-end
-
-local function refresh_path_list()
-    local manifest_content = core.read_data_file(MANIFEST_FILE)
-    saved_paths = {}
-
-    if manifest_content and manifest_content ~= "" then
-        for name in manifest_content:gmatch("([^\n]+)") do
-            if name ~= "" then
-                table.insert(saved_paths, name)
-            end
-        end
-    end
-
-    if ui.path_combo then
-        ui.path_combo:set_items(saved_paths)
-    end
-
-    return saved_paths
 end
 
 -----------------------------------------------------------
@@ -495,42 +434,21 @@ local function get_current_waypoint()
 end
 
 local function advance_to_next_waypoint()
-    -- Move to next waypoint based on direction (NO STOPPING)
-    current_index = current_index + path_direction
+    -- Move to next waypoint (NO STOPPING)
+    current_index = current_index + 1
 
     local num_points = #current_path.points
 
-    -- Handle path boundaries
-    if path_direction == 1 and current_index > num_points then
-        -- For nav mode paths, always stop at destination (ignore loop_enabled checkbox)
-        if nav_mode then
-            state = STATE.IDLE
-            stop_all_movement()
-            nav_mode = false
-            nav_target_pos = nil
-            nav_target_object = nil
-            current_path = nil  -- Clear path visualization
-            old_path = nil
-            core.log("[LX_Mover] Destination reached")
-            return false
-        elseif current_path.path_type == "loop" or loop_enabled then
-            current_index = 1
-        elseif current_path.path_type == "pingpong" then
-            path_direction = -1
-            current_index = num_points - 1
-        else
-            state = STATE.IDLE
-            stop_all_movement()
-            core.log("[LX_Mover] Path complete")
-            return false
-        end
-    elseif path_direction == -1 and current_index < 1 then
-        if current_path.path_type == "pingpong" then
-            path_direction = 1
-            current_index = 2
-        else
-            current_index = num_points
-        end
+    -- Handle path end (nav paths always stop at destination)
+    if current_index > num_points then
+        state = STATE.IDLE
+        stop_all_movement()
+        nav_target_pos = nil
+        nav_target_object = nil
+        current_path = nil  -- Clear path visualization
+        old_path = nil
+        core.log("[LX_Mover] Destination reached")
+        return false
     end
 
     return true
@@ -568,7 +486,6 @@ local function start_path()
 
     -- Find closest waypoint to start from
     current_index = find_closest_waypoint()
-    path_direction = 1
     state = STATE.MOVING
 
     -- Start moving forward immediately
@@ -593,7 +510,6 @@ local function stop_path()
     stop_all_movement()
     state = STATE.IDLE
     current_index = 1
-    path_direction = 1
     nav_mode = false
     nav_target_pos = nil
     nav_target_object = nil
@@ -605,9 +521,9 @@ end
 
 -- Base movement parameters (tuned for ~7 units/sec walking speed)
 local base_speed = 7
-local base_turn_speed = 0.15
+local base_turn_speed = 0.08  -- Smooth direction changes (was 0.15, too fast)
 local base_look_distance = 10
-local base_threshold = 2.5
+local base_threshold = 0.5  -- Reach waypoint before switching (was 2.5, caused corner cutting)
 
 local function update_movement()
     if state ~= STATE.MOVING then return end
@@ -652,10 +568,17 @@ local function update_movement()
                     core.log("[LX_Mover] Target moved, updating path...")
                     path_updating = true
 
+                    -- Check if player is mounted and adjust wall distance
+                    local player = core.object_manager.get_local_player()
+                    local wall_distance = 2.0  -- Default: 2 yards from walls
+                    if player and player:is_mounted() then
+                        wall_distance = 4.0  -- Mounted: 4 yards from walls
+                    end
+
                     -- Request new path from current position
                     local LX_Nav = _G.LX_Nav
                     if LX_Nav then
-                        local result = LX_Nav.request_path(new_target_pos)
+                        local result = LX_Nav.request_path(new_target_pos, wall_distance)
                         if result and result.path then
                             -- Convert and apply smoothing
                             local original_points = {}
@@ -670,6 +593,7 @@ local function update_movement()
                                 original_points = original_points
                             }
 
+                            -- Apply B-spline smoothing after wall-aware pathfinding
                             if smooth_enabled and #original_points >= 3 then
                                 new_path_data.points = smooth_path(original_points, smooth_subdivisions, false)
                             else
@@ -804,10 +728,12 @@ local function render_path()
     local player_pos = player and player:get_position() or nil
     if not player_pos then return end
 
-    -- Color
+    -- Colors
     local col_smooth = color.new(0, 200, 100, 200)  -- Green - smoothed path
+    local col_original = color.new(255, 255, 255, 200)  -- White - original funnel path
 
     local points_2d = {}
+    local original_2d = {}
     local display_points = {}
 
     -- ========== MORPH OLD PATH TO NEW PATH ==========
@@ -903,17 +829,41 @@ local function render_path()
         end
     end
 
-    -- Draw closing line for loop paths (but not for nav mode paths)
-    if not nav_mode and (current_path.path_type == "loop" or loop_enabled) and #display_points > 2 then
-        local first = points_2d[1]
-        local last = points_2d[#display_points]
-        if first.valid and last.valid then
-            core.graphics.line_2d(
-                vec2.new(last.x, last.y),
-                vec2.new(first.x, first.y),
-                col_smooth,
-                2
-            )
+    -- Draw original funnel path (before B-spline smoothing) in white
+    if current_path.original_points and #current_path.original_points > 0 then
+        -- Convert original points to screen coordinates
+        for i = 1, #current_path.original_points do
+            local p = current_path.original_points[i]
+            local world_pos = vec3.new(p.x, p.y, p.z)
+            local screen = core.graphics.w2s(world_pos)
+            if screen and screen.x > 0 and screen.y > 0 then
+                original_2d[i] = {x = screen.x, y = screen.y, valid = true}
+            else
+                original_2d[i] = {valid = false}
+            end
+        end
+
+        -- Draw original path lines
+        for i = 1, #current_path.original_points - 1 do
+            if original_2d[i] and original_2d[i].valid and original_2d[i + 1] and original_2d[i + 1].valid then
+                core.graphics.line_2d(
+                    vec2.new(original_2d[i].x, original_2d[i].y),
+                    vec2.new(original_2d[i + 1].x, original_2d[i + 1].y),
+                    col_original,
+                    1  -- Thinner line to differentiate
+                )
+            end
+        end
+
+        -- Draw waypoint markers on original path
+        for i = 1, #current_path.original_points do
+            if original_2d[i] and original_2d[i].valid then
+                core.graphics.circle_2d_filled(
+                    vec2.new(original_2d[i].x, original_2d[i].y),
+                    3,
+                    col_original
+                )
+            end
         end
     end
 end
@@ -996,12 +946,11 @@ local function init()
     if not LX_UI then return end
 
     initialized = true
-    refresh_path_list()
     load_saved_positions()
 
     -- Layout
     local menu_w = 340
-    local menu_h = 620  -- Increased to fit all UI elements including saved positions
+    local menu_h = 400  -- Compact size (nav mode only)
     local p = 12
     local btn_h = 28
 
@@ -1011,68 +960,9 @@ local function init()
 
     local Label = LX_UI.Label
     local Button = LX_UI.Button
-    local Combobox = LX_UI.Combobox
-    local Checkbox = LX_UI.Checkbox
     local ProgressBar = LX_UI.ProgressBar
 
     local y = 38
-
-    -- Path Selection Section
-    local header1 = Label:new({
-        text = "PATH SELECTION",
-        x = p,
-        y = y,
-        width = menu_w - p*2,
-        height = 18,
-        font_size = 11
-    })
-    menu:add_component(header1)
-    y = y + 24
-
-    -- Path dropdown
-    ui.path_combo = Combobox:new({
-        text = "",
-        x = p,
-        y = y,
-        width = menu_w - p*2 - 70,
-        height = 24,
-        items = saved_paths,
-        default = 1,
-        on_change = function(comp, value, text)
-            if text and text ~= "" then
-                current_path = load_path(text)
-                current_index = 1
-                path_direction = 1
-                state = STATE.IDLE
-            end
-        end
-    })
-    menu:add_component(ui.path_combo)
-
-    -- Refresh button
-    ui.refresh_btn = Button:new({
-        text = "Refresh",
-        x = menu_w - p - 65,
-        y = y,
-        width = 65,
-        height = 24,
-        on_click = function()
-            refresh_path_list()
-        end
-    })
-    menu:add_component(ui.refresh_btn)
-    y = y + 32
-
-    -- Path info label
-    ui.path_info = Label:new({
-        text = "No path loaded",
-        x = p,
-        y = y,
-        width = menu_w - p*2,
-        height = 18
-    })
-    menu:add_component(ui.path_info)
-    y = y + 28
 
     -- Controls Section
     local header2 = Label:new({
@@ -1181,6 +1071,8 @@ local function init()
         height = btn_h - 4,
         on_click = function()
             click_to_path_mode = true
+            -- Consume the button click to prevent it from being treated as the map click
+            prev_mouse_down = true
             core.log("[LX_Mover] Click on the map to set destination")
         end
     })
@@ -1225,33 +1117,6 @@ local function init()
     ui.saved_pos_scroll = 0
     y = y + 105  -- Reserve space for saved position buttons (max 4 buttons at 24px + 4px spacing)
 
-    -- Settings Section
-    local header3 = Label:new({
-        text = "SETTINGS",
-        x = p,
-        y = y,
-        width = menu_w - p*2,
-        height = 18,
-        font_size = 11
-    })
-    menu:add_component(header3)
-    y = y + 24
-
-    -- Loop checkbox
-    ui.loop_check = Checkbox:new({
-        text = "Loop continuously",
-        x = p,
-        y = y,
-        width = menu_w - p*2,
-        height = 20,
-        default = true,
-        on_change = function(comp, value)
-            loop_enabled = value
-        end
-    })
-    menu:add_component(ui.loop_check)
-    y = y + 32
-
     -- Status label
     ui.status = Label:new({
         text = "Status: Idle",
@@ -1272,15 +1137,7 @@ end
 -----------------------------------------------------------
 
 local function update_ui()
-    if not ui.path_info then return end
-
-    -- Update path info
-    if current_path then
-        local type_str = current_path.path_type == "loop" and "Loop" or "Ping-Pong"
-        ui.path_info:set_value(#current_path.points .. " points | " .. type_str)
-    else
-        ui.path_info:set_value("No path loaded")
-    end
+    if not ui.progress then return end
 
     -- Update progress
     if current_path and #current_path.points > 0 then

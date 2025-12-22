@@ -67,7 +67,7 @@ local function ensure_tile_manager()
         tile_manager = TileManager.new({
             frame_budget_ms = 3.0,  -- 3ms per frame for loading
             check_every = 128,       -- Check budget every 128 iterations
-            max_cached = 25,         -- Cache up to 25 tiles
+            max_cached = 100,        -- Cache up to 100 tiles (6x6 grid needs 36)
         })
         Debug.log("[Wireframe] TileManager initialized (3ms budget, 128 check interval)")
     end

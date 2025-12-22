@@ -427,7 +427,7 @@ end
 -- Edge Avoidance Helper
 -- =========================
 
-local EDGE_MARGIN = 10.0  -- 10 yards from dangerous edges
+local EDGE_MARGIN = 2.0  -- Default 2 yards from dangerous edges (4 when mounted)
 local FLOOR_HEIGHT_OFFSET = 0.5  -- Small offset above ground for path visualization
 
 local function adjust_waypoint_for_safety(tile, poly, x, y, margin)
@@ -1449,10 +1449,11 @@ end
 -- Find the optimal steering point on a portal edge
 -- Maximizes progress toward goal while staying on the portal
 -- Shrinks portal inward to keep distance from walls at endpoints
-local PORTAL_SHRINK = 3.0  -- yards - shrink portal endpoints inward
+local DEFAULT_PORTAL_SHRINK = 2.0  -- Default: 2 yards (4 when mounted)
 
-local function steerPointOnPortal(curr, goal, portalA, portalB, w)
+local function steerPointOnPortal(curr, goal, portalA, portalB, w, portal_shrink)
     w = w or 0.5  -- Weight for deviation penalty
+    portal_shrink = portal_shrink or DEFAULT_PORTAL_SHRINK
 
     local function dot(ax, ay, bx, by) return ax * bx + ay * by end
     local function len(ax, ay) return math.sqrt(ax * ax + ay * ay) end
@@ -1463,9 +1464,9 @@ local function steerPointOnPortal(curr, goal, portalA, portalB, w)
     local edgeLen = len(edgeX, edgeY)
 
     local shrinkA, shrinkB = portalA, portalB
-    if edgeLen > PORTAL_SHRINK * 2.5 then
+    if edgeLen > portal_shrink * 2.5 then
         -- Shrink both endpoints inward
-        local shrinkT = PORTAL_SHRINK / edgeLen
+        local shrinkT = portal_shrink / edgeLen
         shrinkA = {x = portalA.x + edgeX * shrinkT, y = portalA.y + edgeY * shrinkT}
         shrinkB = {x = portalB.x - edgeX * shrinkT, y = portalB.y - edgeY * shrinkT}
     elseif edgeLen > 1.0 then
@@ -1975,9 +1976,9 @@ local function getPortalMidpoints(polyPath, startPos, endPos, world)
             local edgeLen = math.sqrt(edgeX * edgeX + edgeY * edgeY)
 
             local midX, midY
-            if edgeLen > PORTAL_SHRINK * 2.5 then
+            if edgeLen > portal_shrink * 2.5 then
                 -- Use midpoint of shrunk portal
-                local shrinkT = PORTAL_SHRINK / edgeLen
+                local shrinkT = portal_shrink / edgeLen
                 local shrinkA = {x = portalA.x + edgeX * shrinkT, y = portalA.y + edgeY * shrinkT}
                 local shrinkB = {x = portalB.x - edgeX * shrinkT, y = portalB.y - edgeY * shrinkT}
                 midX = (shrinkA.x + shrinkB.x) * 0.5
@@ -2076,7 +2077,8 @@ end
 
 -- Corridor follower: generates smooth path using proper funnel algorithm
 -- Uses getPathPortals + stringPull for optimal path smoothing
-local function corridor_follower(polyPath, startPos, endPos, world, nq)
+local function corridor_follower(polyPath, startPos, endPos, world, nq, portal_shrink)
+    portal_shrink = portal_shrink or DEFAULT_PORTAL_SHRINK
     if #polyPath == 0 then
         return {{x = endPos.x, y = endPos.y, z = endPos.z}}, {1}
     end
@@ -2718,9 +2720,10 @@ local PATH_MODE = "corridor"
 -- Returns: array of {x, y, z, transitionType?} waypoints
 -- transitionType is only present for off-mesh connections: "WALK", "JUMP", "TELEPORT", "LADDER", "ELEVATOR"
 -- Regular walkable segments have no transitionType field (nil)
-function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
+function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts, portal_shrink)
     local world = self.world
     maxPts = maxPts or 256
+    portal_shrink = portal_shrink or DEFAULT_PORTAL_SHRINK
 
     if not polyPath or #polyPath == 0 then
         return {{x = endPos.x, y = endPos.y, z = endPos.z}}
@@ -2740,7 +2743,7 @@ function NavQuery:poly_path_to_waypoints(polyPath, startPos, endPos, maxPts)
         local actualEnd = {x = endPos.x, y = endPos.y, z = endPos.z}
 
         -- Generate path using corridor follower (dense waypoints with wall avoidance)
-        local out, owners, originalPath, wallDebug = corridor_follower(polyPath, actualStart, actualEnd, world, self)
+        local out, owners, originalPath, wallDebug = corridor_follower(polyPath, actualStart, actualEnd, world, self, portal_shrink)
 
         -- Height fixing disabled - portal Z values are already correct from wireframe data
         -- fixWaypointHeights was breaking correct heights by trying to look up shifted X,Y positions
@@ -3149,9 +3152,12 @@ end
 
 -- Find path between two world positions
 -- Returns: {success, path (waypoints), polyPath, stats}
-function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
+function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ, wall_distance)
     local world = self.world
     local Debug = require("modules/debug")
+
+    -- Use provided wall distance or default (2.0 normally, 4.0 when mounted)
+    wall_distance = wall_distance or DEFAULT_PORTAL_SHRINK
 
     -- Increment debug counter
     path_debug_counter = path_debug_counter + 1
@@ -3360,7 +3366,9 @@ function NavQuery:find_path(startX, startY, startZ, endX, endY, endZ)
     local waypoints, originalPath, wallDebug = self:poly_path_to_waypoints(
         polyPath,
         {x = startX, y = startY, z = startZ},
-        {x = endX, y = endY, z = endZ}
+        {x = endX, y = endY, z = endZ},
+        256,  -- maxPts
+        wall_distance  -- portal_shrink
     )
     local funnelTime = (core.cpu_ticks() - startTime) / (core.cpu_ticks_per_second() / 1000)
 

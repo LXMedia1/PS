@@ -12,6 +12,7 @@ local NavQuery = require("modules/nav_query")
 
 -- Graphics
 local color = require("common/color")
+local vec2 = require("common/geometry/vector_2")
 local vec3 = require("common/geometry/vector_3")
 
 -- Menu elements (created upfront)
@@ -62,6 +63,94 @@ local PathState = {
 local click_to_path_mode = false
 local saved_safe_pos = nil  -- {x, y, z, map_id}
 local prev_mouse_down = false  -- For click edge detection
+
+-- Loading status display
+local loading_status = {
+    active = false,
+    message = "",
+    progress = 0,      -- 0 to 1
+    start_time = 0,
+}
+
+-- Show loading status
+local function show_loading_status(message, progress)
+    loading_status.active = true
+    loading_status.message = message
+    local old_progress = loading_status.progress
+    loading_status.progress = progress or 0
+
+    -- Track time when reaching 100% for auto-hide timer
+    if old_progress < 1.0 and loading_status.progress >= 1.0 then
+        loading_status.start_time = core.time and core.time() or 0
+    elseif loading_status.progress < 1.0 and (not loading_status.start_time or loading_status.start_time == 0) then
+        loading_status.start_time = core.time and core.time() or 0
+    end
+end
+
+-- Hide loading status
+local function hide_loading_status()
+    loading_status.active = false
+    loading_status.message = ""
+    loading_status.progress = 0
+    loading_status.start_time = 0
+end
+
+-- Draw loading status bar at top center of screen
+local function draw_loading_status()
+    if not loading_status.active then return end
+
+    local screen_size = core.graphics.get_screen_size()
+    if not screen_size then return end
+
+    local bar_width = 400
+    local bar_height = 30
+    local bar_x = (screen_size.x - bar_width) / 2
+    local bar_y = 10
+
+    -- Background (dark semi-transparent)
+    local bg_color = color.new(0, 0, 0, 200)
+    core.graphics.rect_2d_filled(
+        vec2.new(bar_x, bar_y),
+        bar_width,
+        bar_height,
+        bg_color,
+        4
+    )
+
+    -- Progress bar fill
+    if loading_status.progress > 0 then
+        local fill_width = (bar_width - 4) * loading_status.progress
+        local fill_color = color.new(100, 200, 255, 220)
+        core.graphics.rect_2d_filled(
+            vec2.new(bar_x + 2, bar_y + 2),
+            fill_width,
+            bar_height - 4,
+            fill_color,
+            3
+        )
+    end
+
+    -- Border
+    local border_color = color.new(100, 200, 255, 255)
+    core.graphics.rect_2d(
+        vec2.new(bar_x, bar_y),
+        bar_width,
+        bar_height,
+        border_color,
+        2,
+        4
+    )
+
+    -- Text
+    local text_color = color.new(255, 255, 255, 255)
+    core.graphics.text_2d(
+        loading_status.message,
+        vec2.new(bar_x + bar_width / 2, bar_y + bar_height / 2 - 6),
+        14,
+        text_color,
+        true
+    )
+end
 
 -- Test binary reading helpers
 local function test_binary_helpers()
@@ -2569,11 +2658,8 @@ local function on_update()
     -- Update debug frame timing
     Debug.update_frame_time()
 
-    -- Check enabled state from menu
-    State.enabled = menu_elements.enabled:get_state()
-    if not State.enabled then return end
-
-    -- Ensure tiles are loading for pathfinding (even when wireframe is off)
+    -- Ensure tiles are loading for pathfinding (even when plugin is disabled for visualization)
+    -- This is needed so LX_Mover and other plugins can use the pathfinding API
     local mgr = Wireframe.get_tile_manager()
     if mgr then
         -- Queue nearby tiles based on player position
@@ -2585,12 +2671,39 @@ local function on_update()
                 mgr:queue_nearby(instanceId, pos.x, pos.y)
             end
         end
+
+        -- Get tile manager stats before processing
+        local stats = mgr:get_stats()
+        local has_work = stats.queued > 0 or stats.in_flight > 0
+
+        -- Show progress bar when tiles are loading
+        if has_work then
+            local total = stats.cached + stats.queued + stats.in_flight
+            local loaded = stats.cached
+            local progress = total > 0 and (loaded / total) or 0
+
+            if stats.in_flight > 0 then
+                show_loading_status(string.format("Loading tiles... (%d queued, %d loading)", stats.queued, stats.in_flight), progress)
+            else
+                show_loading_status(string.format("Loading tiles... (%d queued)", stats.queued), progress)
+            end
+        else
+            -- No tiles loading, hide progress bar
+            if loading_status.active and loading_status.progress < 1.0 then
+                hide_loading_status()
+            end
+        end
+
         -- Process tile loading (frame-budgeted)
         mgr:process_frame(3.0)
     end
 
     -- Sync pathfinding world with loaded tiles
     sync_pathfinding()
+
+    -- Check enabled state from menu (for visualization only)
+    State.enabled = menu_elements.enabled:get_state()
+    if not State.enabled then return end
 
     -- Process floor height snapping incrementally (non-blocking)
     NavQuery.process_floor_snapping(3)  -- 3 waypoints per frame
@@ -2620,6 +2733,18 @@ end
 -- Render callback (called every frame for drawing)
 local function on_render()
     if not State.initialized then return end
+
+    -- Always draw loading status (even when plugin disabled) since it's used by LX_Mover
+    draw_loading_status()
+
+    -- Auto-hide loading status after 1 second when complete
+    if loading_status.active and loading_status.progress >= 1.0 then
+        local current_time = core.time and core.time() or 0
+        if current_time - loading_status.start_time > 1.0 then
+            hide_loading_status()
+        end
+    end
+
     if not State.enabled then return end
 
     -- Update wireframe settings from menu
@@ -2743,7 +2868,12 @@ local function on_render_menu()
             local click_label = click_to_path_mode and "Path to Click [ACTIVE]" or "Path to Click"
             if menu_elements.path_to_click:render(click_label) then
                 click_to_path_mode = not click_to_path_mode
-                Debug.log(click_to_path_mode and "[Path] Click mode ON" or "[Path] Click mode OFF")
+                if click_to_path_mode then
+                    -- Set prev_mouse_down to true to consume the button click
+                    -- This ensures the next click in the world will be the pathfinding trigger
+                    prev_mouse_down = true
+                end
+                Debug.log(click_to_path_mode and "[Path] Click mode ON - Click on terrain to set destination" or "[Path] Click mode OFF")
             end
 
             if menu_elements.save_safe_pos:render("Save Safe Pos") then
@@ -2800,7 +2930,8 @@ local LX_Nav = {}
 
 -- Request a path from current position to target
 -- Returns: {path, originalPath, stats} or nil on failure
-function LX_Nav.request_path(target_pos)
+function LX_Nav.request_path(target_pos, wall_distance)
+    wall_distance = wall_distance or 2.0  -- Default 2 yards from walls
     if not PathState.world or not PathState.query then
         core.log_error("[LX_Nav] Navigation not initialized")
         return nil
@@ -2824,16 +2955,110 @@ function LX_Nav.request_path(target_pos)
         return nil
     end
 
-    -- Build path
-    local result = PathState.query:find_path(
-        start_pos.x, start_pos.y, start_pos.z,
-        target_pos.x, target_pos.y, target_pos.z
-    )
+    -- Iteratively load tiles and try pathfinding until we succeed or hit max expansion
+    local mgr = Wireframe.get_tile_manager()
+    local result = nil
+    local expansion = 1  -- Start with 1 tile buffer around corridor
+    local max_expansion = 3  -- Max 3 tiles expansion (3x3 grid around player minimum)
+
+    if mgr then
+        -- Get tile coordinates for start and end
+        local start_tx, start_ty = PathState.world:get_tile_coords(start_pos.x, start_pos.y)
+        local end_tx, end_ty = PathState.world:get_tile_coords(target_pos.x, target_pos.y)
+
+        for attempt = 1, max_expansion do
+            -- Calculate corridor area with current expansion buffer
+            local min_tx = math.min(start_tx, end_tx) - expansion
+            local max_tx = math.max(start_tx, end_tx) + expansion
+            local min_ty = math.min(start_ty, end_ty) - expansion
+            local max_ty = math.max(start_ty, end_ty) + expansion
+
+            -- Queue tiles that aren't loaded yet
+            local tiles_to_queue = 0
+            for tx = min_tx, max_tx do
+                for ty = min_ty, max_ty do
+                    if not mgr:is_loaded(map_id, tx, ty) then
+                        mgr:queue_tile(map_id, tx, ty, 0)  -- High priority
+                        tiles_to_queue = tiles_to_queue + 1
+                    end
+                end
+            end
+
+            -- Load the new tiles if needed
+            if tiles_to_queue > 0 then
+                core.log(string.format("[LX_Nav] Loading %d tiles (expansion %d)...", tiles_to_queue, expansion))
+                show_loading_status(string.format("Loading %d tiles...", tiles_to_queue), 0.1)
+
+                -- Process tiles with progress feedback
+                for load_attempt = 1, 20 do  -- Up to 20 attempts (400ms max)
+                    mgr:process_frame(20.0)  -- 20ms per attempt
+
+                    -- Sync to pathfinding world
+                    local instanceId = core.get_instance_id()
+                    PathState.world:sync_with_tile_manager(mgr, instanceId)
+
+                    -- Update progress
+                    local stats = mgr:get_stats()
+                    local progress = 0.1 + (load_attempt / 20) * 0.7
+                    show_loading_status(string.format("Loading tiles... (%d queued)", stats.queued), progress)
+
+                    -- Check if all tiles are loaded or failed
+                    if stats.queued == 0 and stats.in_flight == 0 then
+                        core.log(string.format("[LX_Nav] Tiles loaded/failed after %d attempts", load_attempt))
+                        break
+                    end
+                end
+            end
+
+            -- Hide progress bar before pathfinding
+            hide_loading_status()
+
+            -- Try pathfinding with current tiles
+            result = PathState.query:find_path(
+                start_pos.x, start_pos.y, start_pos.z,
+                target_pos.x, target_pos.y, target_pos.z,
+                wall_distance
+            )
+
+            -- If we got a path, stop expanding
+            if result and result.success then
+                core.log(string.format("[LX_Nav] Path found with expansion %d", expansion))
+                break
+            end
+
+            -- If we failed and can expand more, try next expansion
+            if attempt < max_expansion then
+                core.log(string.format("[LX_Nav] Path failed with expansion %d, trying %d...", expansion, expansion + 1))
+                expansion = expansion + 1
+            else
+                core.log(string.format("[LX_Nav] Path failed after max expansion %d", max_expansion))
+            end
+        end
+    else
+        -- No tile manager, just try pathfinding
+        result = PathState.query:find_path(
+            start_pos.x, start_pos.y, start_pos.z,
+            target_pos.x, target_pos.y, target_pos.z,
+            wall_distance
+        )
+    end
 
     if not result or not result.success then
-        core.log_error("[LX_Nav] Pathfinding failed")
+        local error_msg = result and result.error or "unknown error"
+        local expansions = result and result.expansions or 0
+        core.log_error(string.format("[LX_Nav] Pathfinding failed: %s (expansions: %d)", error_msg, expansions))
+
+        -- Check NavWorld stats to see if tiles are actually loaded
+        local world_stats = PathState.world:get_stats()
+        core.log_error(string.format("[LX_Nav] NavWorld has %d tiles, %d polys, %d resolved edges",
+            world_stats.tiles, world_stats.polys, world_stats.resolvedEdges))
+
+        hide_loading_status()
         return nil
     end
+
+    -- Success - show completion then hide
+    show_loading_status("Path ready!", 1.0)
 
     -- Don't store path in PathState when called from other plugins
     -- (prevents dual path visualization)
