@@ -4,6 +4,7 @@ local LX_Mover = {}
 local color = require("common/color")
 local vec2 = require("common/geometry/vector_2")
 local vec3 = require("common/geometry/vector_3")
+local flying = require("flying")
 
 -- State constants
 local STATE = {
@@ -44,6 +45,10 @@ local nav_target_pos = nil  -- Target position for nav mode
 local nav_target_object = nil  -- Target object if following a moving target
 local nav_last_update = 0  -- Last time path was updated
 local saved_positions = {}  -- {name: {x, y, z, map_id}}
+
+-- Flying mode settings
+local flight_mode_enabled = false  -- User checkbox preference
+local dismount_on_arrival = false  -- User checkbox for auto-dismount on arrival
 
 -- Path transition state
 local old_path = nil  -- Previous path for smooth transitions
@@ -299,6 +304,12 @@ local function request_nav_path(target_pos)
 
     core.log(string.format("[LX_Mover] Nav path created with %d waypoints (%d after smoothing, wall_dist=%.1f)",
         #original_points, #path_data.points, wall_distance))
+
+    -- Analyze path for flying if flight mode is enabled
+    if flight_mode_enabled then
+        flying.analyze_and_prepare_flight(path_data, player)
+    end
+
     return path_data
 end
 
@@ -569,6 +580,18 @@ local function update_movement()
 
     local player = core.object_manager.get_local_player()
     if not player then return end
+
+    -- Flying module override
+    if flight_mode_enabled then
+        flying.enabled = true
+        flying.dismount_on_arrival = dismount_on_arrival
+        local flying_active = flying.update(player, current_path, current_index)
+        if flying_active then
+            return  -- Flying module is handling movement
+        end
+    else
+        flying.enabled = false
+    end
 
     local pos = player:get_position()
     if not pos then return end
@@ -904,6 +927,11 @@ local function render_path()
             end
         end
     end
+
+    -- Flying module visualization
+    if flight_mode_enabled then
+        flying.render(current_path, current_index)
+    end
 end
 
 -----------------------------------------------------------
@@ -1116,6 +1144,67 @@ local function init()
     menu:add_component(ui.show_original_cb)
     y = y + 22
 
+    -- ========== FLYING SECTION ==========
+    local header_flying = Label:new({
+        text = "FLYING",
+        x = p,
+        y = y,
+        width = menu_w - p*2,
+        height = 18,
+        font_size = 11
+    })
+    menu:add_component(header_flying)
+    y = y + 24
+
+    -- Use Fly checkbox
+    ui.use_fly_cb = Checkbox:new({
+        text = "Use Fly (auto mount/dismount)",
+        x = p,
+        y = y,
+        checked = flight_mode_enabled,
+        on_change = function(comp, value)
+            flight_mode_enabled = value
+            flying.enabled = value
+            if value then
+                core.log("[LX_Mover] Flight mode enabled")
+            else
+                core.log("[LX_Mover] Flight mode disabled")
+                -- Force dismount if currently flying
+                if flying.get_state() ~= "grounded" then
+                    flying.force_dismount()
+                end
+            end
+        end
+    })
+    menu:add_component(ui.use_fly_cb)
+    y = y + 22
+
+    -- Dismount on Arrival checkbox
+    ui.dismount_arrival_cb = Checkbox:new({
+        text = "Dismount on arrival",
+        x = p,
+        y = y,
+        checked = dismount_on_arrival,
+        on_change = function(comp, value)
+            dismount_on_arrival = value
+            flying.dismount_on_arrival = value
+        end
+    })
+    menu:add_component(ui.dismount_arrival_cb)
+    y = y + 22
+
+    -- Flight Status label (dynamic)
+    ui.flight_status = Label:new({
+        text = "Flight Status: Grounded",
+        x = p,
+        y = y,
+        width = menu_w - p*2,
+        height = 16,
+        font_size = 9
+    })
+    menu:add_component(ui.flight_status)
+    y = y + 20
+
     -- Nav path buttons (3 buttons in a row)
     local nav_btn_w = (menu_w - p*2 - 12) / 3
 
@@ -1301,6 +1390,14 @@ local function on_update()
 
     if menu then
         menu:update()
+    end
+
+    -- Update flight status label
+    if ui.flight_status and flight_mode_enabled then
+        local state_text = flying.get_state()
+        ui.flight_status.text = "Flight Status: " .. state_text:gsub("^%l", string.upper)
+    elseif ui.flight_status then
+        ui.flight_status.text = "Flight Status: Disabled"
     end
 
     handle_click_to_path()
