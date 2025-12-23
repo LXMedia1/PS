@@ -39,3 +39,4 @@ GEMINI.md
 # Auto Claude data directory
 .auto-claude/
 /.worktrees
+scripts/LX_UI/.claude_settings.json

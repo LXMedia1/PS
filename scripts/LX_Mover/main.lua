@@ -307,7 +307,10 @@ local function request_nav_path(target_pos)
 
     -- Analyze path for flying if flight mode is enabled
     if flight_mode_enabled then
+        core.log("[LX_Mover] Calling flying.analyze_and_prepare_flight (flight_mode_enabled=" .. tostring(flight_mode_enabled) .. ", player=" .. tostring(player ~= nil) .. ")")
         flying.analyze_and_prepare_flight(path_data, player)
+    else
+        core.log("[LX_Mover] Skipping flying analysis (flight_mode_enabled=" .. tostring(flight_mode_enabled) .. ")")
     end
 
     return path_data
@@ -535,8 +538,9 @@ local function start_path()
     current_index = find_closest_waypoint()
     state = STATE.MOVING
 
-    -- Start moving forward immediately
-    start_forward()
+    -- DON'T start movement here - let update_movement() decide
+    -- If flying should handle it, flying.update() will block ground movement
+    -- If ground should handle it, it will start on first update_movement() call
 end
 
 local function pause_path()
@@ -549,7 +553,7 @@ end
 local function resume_path()
     if state == STATE.PAUSED then
         state = STATE.MOVING
-        start_forward()
+        -- Movement will resume in update_movement()
     end
 end
 
@@ -754,6 +758,12 @@ local last_reactivate_attempt = 0
 local function update_tabbed_out()
     -- Only check when we're in moving state
     if state ~= STATE.MOVING then
+        is_tabbed_out = false
+        return
+    end
+
+    -- CRITICAL: Don't interfere with flying module
+    if flight_mode_enabled and flying.get_state() ~= "grounded" then
         is_tabbed_out = false
         return
     end
@@ -1018,6 +1028,12 @@ local function init()
     initialized = true
     load_saved_positions()
 
+    -- Setup flying completion callback (stops path when flying lands)
+    flying.set_on_complete_callback(function()
+        core.log("[LX_Mover] Flying completed, stopping path")
+        stop_path()
+    end)
+
     -- Layout
     local menu_w = 340
     local menu_h = 400  -- Compact size (nav mode only)
@@ -1086,6 +1102,10 @@ local function init()
         width = btn_w,
         height = btn_h,
         on_click = function()
+            -- Stop flying first if active
+            if flight_mode_enabled then
+                flying.force_stop()
+            end
             stop_path()
         end
     })
@@ -1146,7 +1166,7 @@ local function init()
 
     -- ========== FLYING SECTION ==========
     local header_flying = Label:new({
-        text = "FLYING",
+        text = "FLYING (EXPERIMENTAL)",
         x = p,
         y = y,
         width = menu_w - p*2,
@@ -1156,18 +1176,75 @@ local function init()
     menu:add_component(header_flying)
     y = y + 24
 
-    -- Use Fly checkbox
-    ui.use_fly_cb = Checkbox:new({
-        text = "Use Fly (auto mount/dismount)",
+    -- Test Mount Scan button
+    ui.test_mount_scan_btn = Button:new({
+        text = "Test Mount Scan",
         x = p,
         y = y,
-        checked = flight_mode_enabled,
+        width = (menu_w - p*2 - 6) / 2,
+        height = btn_h - 4,
+        on_click = function()
+            local count = flying.test_mount_scan()
+            core.log("[LX_Mover] Mount scan test complete! Found " .. count .. " flying mounts (check console)")
+        end
+    })
+    menu:add_component(ui.test_mount_scan_btn)
+
+    -- Test API Values button (next to Mount Scan)
+    ui.test_api_btn = Button:new({
+        text = "Test API Values",
+        x = p + (menu_w - p*2 - 6) / 2 + 6,
+        y = y,
+        width = (menu_w - p*2 - 6) / 2,
+        height = btn_h - 4,
+        on_click = function()
+            flying.test_api_values()
+        end
+    })
+    menu:add_component(ui.test_api_btn)
+    y = y + btn_h
+
+    -- Test Flight Controls button (full width)
+    ui.test_flight_control_btn = Button:new({
+        text = "Test Flight Controls (fly up first, then click)",
+        x = p,
+        y = y,
+        width = menu_w - p*2,
+        height = btn_h - 4,
+        on_click = function()
+            flying.start_flight_control_test()
+        end
+    })
+    menu:add_component(ui.test_flight_control_btn)
+    y = y + btn_h
+
+    -- Sync local variables with flying module state before creating checkboxes
+    flight_mode_enabled = flying.enabled
+    dismount_on_arrival = flying.dismount_on_arrival
+
+    -- Use Fly checkbox (DISABLED for testing)
+    ui.use_fly_cb = Checkbox:new({
+        text = "Enable Flying (TEST - verify mounts first!)",
+        x = p,
+        y = y,
+        checked = flying.enabled,  -- Read actual state from flying module
         on_change = function(comp, value)
-            flight_mode_enabled = value
-            flying.enabled = value
             if value then
-                core.log("[LX_Mover] Flight mode enabled")
+                -- Verify mounts were found first
+                local count = flying.test_mount_scan()
+                if count == 0 then
+                    core.log_warning("[LX_Mover] No flying mounts detected! Cannot enable flight mode.")
+                    core.log_warning("[LX_Mover] Please check mount scan results and verify detection logic.")
+                    comp.checked = false
+                    flight_mode_enabled = false
+                    return
+                end
+                flight_mode_enabled = true
+                flying.enabled = true
+                core.log("[LX_Mover] Flight mode ENABLED with " .. count .. " flying mounts available")
             else
+                flight_mode_enabled = false
+                flying.enabled = false
                 core.log("[LX_Mover] Flight mode disabled")
                 -- Force dismount if currently flying
                 if flying.get_state() ~= "grounded" then
@@ -1177,6 +1254,28 @@ local function init()
         end
     })
     menu:add_component(ui.use_fly_cb)
+
+    -- CRITICAL: Manually trigger initialization based on ACTUAL CHECKBOX STATE
+    -- The on_change callback doesn't fire when checkbox is created, so we must manually call the logic
+    if ui.use_fly_cb.checked then
+        local count = flying.test_mount_scan()
+        if count == 0 then
+            core.log_warning("[LX_Mover] No flying mounts detected! Flight mode disabled.")
+            ui.use_fly_cb.checked = false
+            flight_mode_enabled = false
+            flying.enabled = false
+        else
+            flight_mode_enabled = true
+            flying.enabled = true
+            core.log("[LX_Mover] ✓ Flight mode ENABLED on startup with " .. count .. " flying mounts")
+        end
+    else
+        -- Checkbox is unchecked, ensure everything is disabled
+        flight_mode_enabled = false
+        flying.enabled = false
+        core.log("[LX_Mover] Flight mode disabled on startup")
+    end
+
     y = y + 22
 
     -- Dismount on Arrival checkbox
@@ -1184,13 +1283,74 @@ local function init()
         text = "Dismount on arrival",
         x = p,
         y = y,
-        checked = dismount_on_arrival,
+        checked = flying.dismount_on_arrival,  -- Read actual state from flying module
         on_change = function(comp, value)
             dismount_on_arrival = value
             flying.dismount_on_arrival = value
         end
     })
     menu:add_component(ui.dismount_arrival_cb)
+
+    -- CRITICAL: Manually trigger initialization based on ACTUAL CHECKBOX STATE
+    if ui.dismount_arrival_cb.checked then
+        dismount_on_arrival = true
+        flying.dismount_on_arrival = true
+        core.log("[LX_Mover] ✓ Dismount on arrival ENABLED on startup")
+    else
+        dismount_on_arrival = false
+        flying.dismount_on_arrival = false
+    end
+
+    y = y + 22
+
+    -- Show Obstacle Visualization checkbox
+    ui.show_obstacle_viz_cb = Checkbox:new({
+        text = "Show obstacle detection rays",
+        x = p,
+        y = y,
+        checked = flying.get_show_obstacle_viz(),  -- Get current state from flying module
+        on_change = function(comp, value)
+            flying.set_show_obstacle_viz(value)
+            core.log("[LX_Mover] Obstacle visualization " .. (value and "enabled" or "disabled"))
+        end
+    })
+    menu:add_component(ui.show_obstacle_viz_cb)
+
+    -- CRITICAL: Manually trigger initialization based on ACTUAL CHECKBOX STATE
+    if ui.show_obstacle_viz_cb.checked then
+        flying.set_show_obstacle_viz(true)
+        core.log("[LX_Mover] ✓ Obstacle visualization ENABLED on startup")
+    else
+        flying.set_show_obstacle_viz(false)
+    end
+
+    y = y + 22
+
+    -- Debug Mode checkbox (always fly for testing)
+    ui.debug_fly_cb = Checkbox:new({
+        text = "Debug: Always fly (ignore time threshold)",
+        x = p,
+        y = y,
+        checked = flying.debug_mode,  -- Read actual state from flying module
+        on_change = function(comp, value)
+            flying.debug_mode = value
+            if value then
+                core.log("[LX_Mover] Flying debug mode enabled - will fly on ALL outdoor paths")
+            else
+                core.log("[LX_Mover] Flying debug mode disabled - normal time threshold applies")
+            end
+        end
+    })
+    menu:add_component(ui.debug_fly_cb)
+
+    -- CRITICAL: Manually trigger initialization based on ACTUAL CHECKBOX STATE
+    if ui.debug_fly_cb.checked then
+        flying.debug_mode = true
+        core.log("[LX_Mover] ✓ Flying debug mode ENABLED on startup - will fly on ALL outdoor paths")
+    else
+        flying.debug_mode = false
+    end
+
     y = y + 22
 
     -- Flight Status label (dynamic)
